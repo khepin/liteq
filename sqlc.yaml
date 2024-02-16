@@ -1,0 +1,17 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "db/queries.sql"
+    schema: "db/schema.sql"
+    gen:
+      go:
+        package: "internal"
+        out: "internal"
+        emit_result_struct_pointers: true
+        overrides:
+          - column: jobs.consumer_id
+            go_type: "string"
+          - column: jobs.errors
+            go_type:
+              import: ""
+              type: "ErrorList"
