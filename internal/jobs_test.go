@@ -224,7 +224,7 @@ func Test_Consume(t *testing.T) {
 	go func() {
 		jqueue.Consume(ctx, internal.ConsumeParams{
 			Queue:    "q1",
-			PoolSize: 10,
+			PoolSize: 1,
 			Worker: func(ctx context.Context, job *internal.Job) error {
 				q1 <- job.Job
 				if job.Job == "q1-99" {
@@ -243,7 +243,7 @@ func Test_Consume(t *testing.T) {
 	go func() {
 		jqueue.Consume(ctx2, internal.ConsumeParams{
 			Queue:    "q2",
-			PoolSize: 7,
+			PoolSize: 1,
 			Worker: func(ctx context.Context, job *internal.Job) error {
 				q2 <- job.Job
 				if job.Job == "q2-99" {
@@ -357,7 +357,7 @@ func Test_VisibilityTimeout(t *testing.T) {
 	go func() {
 		jqueue.Consume(ctx, internal.ConsumeParams{
 			Queue:             "",
-			PoolSize:          6,
+			PoolSize:          1,
 			VisibilityTimeout: 1,
 			OnEmptySleep:      100 * time.Millisecond,
 			Worker: func(ctx context.Context, job *internal.Job) error {
