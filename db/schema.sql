@@ -3,7 +3,7 @@ PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER NOT NULL,
     queue TEXT NOT NULL,
-    job TEXT NOT NULL,
+    job BLOB NOT NULL,
     job_status TEXT NOT NULL DEFAULT 'queued',
     execute_after INTEGER NOT NULL DEFAULT 0,
     remaining_attempts INTEGER NOT NULL DEFAULT 1,

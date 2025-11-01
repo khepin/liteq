@@ -13,7 +13,7 @@ import (
 
 type QueueJobParams struct {
 	Queue             string
-	Job               string
+	Job               []byte
 	ExecuteAfter      int64
 	RemainingAttempts int64
 	DedupingKey       DedupingKey

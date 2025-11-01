@@ -68,7 +68,7 @@ func Test_QueueJob(t *testing.T) {
 	is.NoErr(err) // error opening sqlite3 database
 
 	jqueue := internal.New(sqlcdb)
-	jobPaylod := `{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`
+	jobPaylod := []byte(`{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`)
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue: "",
 		Job:   jobPaylod,
@@ -90,7 +90,7 @@ func Test_FetchTwice(t *testing.T) {
 	is.NoErr(err) // error opening sqlite3 database
 
 	jqueue := internal.New(sqlcdb)
-	jobPaylod := `{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`
+	jobPaylod := []byte(`{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`)
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue: "",
 		Job:   jobPaylod,
@@ -119,7 +119,7 @@ func Test_DelayedJob(t *testing.T) {
 	is.NoErr(err) // error getting job queue
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue:        "",
-		Job:          `{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`,
+		Job:          []byte(`{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`),
 		ExecuteAfter: time.Now().Unix() + 1,
 	})
 	is.NoErr(err) // error queuing job
@@ -148,7 +148,7 @@ func Test_PrefetchJobs(t *testing.T) {
 
 		err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 			Queue: "",
-			Job:   `{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`,
+			Job:   []byte(`{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`),
 		})
 		is.NoErr(err) // error queuing job
 	}
@@ -190,7 +190,7 @@ func Test_Consume(t *testing.T) {
 	fillq1 := make(chan struct{}, 1)
 	go func() {
 		for i := 0; i < 100; i++ {
-			jobPayload := fmt.Sprintf("q1-%d", i)
+			jobPayload := []byte(fmt.Sprintf("q1-%d", i))
 			err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 				Queue: "q1",
 				Job:   jobPayload,
@@ -205,7 +205,7 @@ func Test_Consume(t *testing.T) {
 	fillq2 := make(chan struct{}, 1)
 	go func() {
 		for i := 0; i < 100; i++ {
-			jobPayload := fmt.Sprintf("q2-%d", i)
+			jobPayload := []byte(fmt.Sprintf("q2-%d", i))
 			err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 				Queue: "q2",
 				Job:   jobPayload,
@@ -217,7 +217,7 @@ func Test_Consume(t *testing.T) {
 		close(fillq2)
 	}()
 
-	q1 := make(chan string, 100)
+	q1 := make(chan []byte, 100)
 	q1done := make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -227,7 +227,7 @@ func Test_Consume(t *testing.T) {
 			PoolSize: 1,
 			Worker: func(ctx context.Context, job *internal.Job) error {
 				q1 <- job.Job
-				if job.Job == "q1-99" {
+				if string(job.Job) == "q1-99" {
 					q1done <- struct{}{}
 					close(q1done)
 					close(q1)
@@ -237,7 +237,7 @@ func Test_Consume(t *testing.T) {
 		})
 	}()
 
-	q2 := make(chan string, 100)
+	q2 := make(chan []byte, 100)
 	q2done := make(chan struct{}, 1)
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	go func() {
@@ -246,7 +246,7 @@ func Test_Consume(t *testing.T) {
 			PoolSize: 1,
 			Worker: func(ctx context.Context, job *internal.Job) error {
 				q2 <- job.Job
-				if job.Job == "q2-99" {
+				if string(job.Job) == "q2-99" {
 					q2done <- struct{}{}
 					close(q2done)
 					close(q2)
@@ -265,14 +265,14 @@ func Test_Consume(t *testing.T) {
 
 	i := 0
 	for pl := range q1 {
-		is.True(strings.HasPrefix(pl, "q1")) // expected q1-*
+		is.True(strings.HasPrefix(string(pl), "q1")) // expected q1-*
 		i++
 	}
 	is.Equal(i, 100) // expected 100 jobs
 
 	j := 0
 	for pl := range q2 {
-		is.True(strings.HasPrefix(pl, "q2")) // expected q2-*
+		is.True(strings.HasPrefix(string(pl), "q2")) // expected q2-*
 		j++
 	}
 	is.Equal(j, 100) // expected 100 jobs
@@ -285,7 +285,7 @@ func Test_MultipleAttempts(t *testing.T) {
 
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue:             "",
-		Job:               `{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`,
+		Job:               []byte(`{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`),
 		RemainingAttempts: 3,
 	})
 	is.NoErr(err) // error queuing job
@@ -348,7 +348,7 @@ func Test_VisibilityTimeout(t *testing.T) {
 
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue: "",
-		Job:   `{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`,
+		Job:   []byte(`{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`),
 	})
 	is.NoErr(err) // error queuing job
 
@@ -385,14 +385,14 @@ func Test_DedupeIgnore(t *testing.T) {
 	is.NoErr(err) // error getting job queue
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue:       "",
-		Job:         `job:1`,
+		Job:         []byte(`job:1`),
 		DedupingKey: internal.IgnoreDuplicate("dedupe"),
 	})
 	is.NoErr(err) // error queuing job
 
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue:       "",
-		Job:         `job:2`,
+		Job:         []byte(`job:2`),
 		DedupingKey: internal.IgnoreDuplicate("dedupe"),
 	})
 	is.NoErr(err) // error queuing job
@@ -401,9 +401,9 @@ func Test_DedupeIgnore(t *testing.T) {
 		Queue: "",
 		Count: 10,
 	})
-	is.NoErr(err)                  // error fetching job for consumer
-	is.Equal(len(jobs), 1)         // expected only 1 job due to dedupe
-	is.Equal(jobs[0].Job, `job:1`) // expected job:1
+	is.NoErr(err)                          // error fetching job for consumer
+	is.Equal(len(jobs), 1)                 // expected only 1 job due to dedupe
+	is.Equal(string(jobs[0].Job), `job:1`) // expected job:1
 }
 
 func Test_DedupeReplace(t *testing.T) {
@@ -412,14 +412,14 @@ func Test_DedupeReplace(t *testing.T) {
 	is.NoErr(err) // error getting job queue
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue:       "",
-		Job:         `job:1`,
+		Job:         []byte(`job:1`),
 		DedupingKey: internal.ReplaceDuplicate("dedupe"),
 	})
 	is.NoErr(err) // error queuing job
 
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue:       "",
-		Job:         `job:2`,
+		Job:         []byte(`job:2`),
 		DedupingKey: internal.ReplaceDuplicate("dedupe"),
 	})
 	is.NoErr(err) // error queuing job
@@ -428,7 +428,7 @@ func Test_DedupeReplace(t *testing.T) {
 		Queue: "",
 		Count: 10,
 	})
-	is.NoErr(err)                  // error fetching job for consumer
-	is.Equal(len(jobs), 1)         // expected only 1 job due to dedupe
-	is.Equal(jobs[0].Job, `job:2`) // expected job:1
+	is.NoErr(err)                          // error fetching job for consumer
+	is.Equal(len(jobs), 1)                 // expected only 1 job due to dedupe
+	is.Equal(string(jobs[0].Job), `job:2`) // expected job:1
 }
