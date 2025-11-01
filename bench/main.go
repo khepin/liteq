@@ -26,7 +26,7 @@ func main() {
 		for i := 0; i < howMany; i++ {
 			jq.QueueJob(context.Background(), liteq.QueueJobParams{
 				Queue: fmt.Sprintf("default-%d", i%30),
-				Job:   "SendEmail",
+				Job:   []byte("SendEmail"),
 			})
 		}
 	}()
