@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,4 +49,35 @@ func TestGOBMarshaler(t *testing.T) {
 	jobItem, err := marshaler.Unmarshal(dataBytes)
 	require.NoError(t, err)
 	assert.Equal(t, 12, jobItem.ID)
+}
+
+func BenchmarkQueue(b *testing.B) {
+	dbPath := filepath.Join(b.TempDir(), "sqlite.db")
+	defer os.Remove(dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(b, err)
+	_, err = db.Exec(Schema)
+	require.NoError(b, err)
+
+	jqeue := New(db)
+	queue := NewQueue[*testJobItem](jqeue, "t1", JSONMarshaler[*testJobItem]{})
+
+	for b.Loop() {
+		ctx, cancel := context.WithCancel(context.Background())
+		maxItems := 10000
+		go func(queue *Queue[*testJobItem]) {
+			for i := 0; i < maxItems; i++ {
+				ctx := context.Background()
+				queue.Put(ctx, &testJobItem{
+					ID: i,
+				})
+			}
+		}(queue)
+		queue.Consume(ctx, func(ctx context.Context, job *testJobItem) error {
+			if job.ID == maxItems-1 {
+				cancel()
+			}
+			return nil
+		}, PoolSize(5), OnEmptySleep(time.Millisecond*10))
+	}
 }
