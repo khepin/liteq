@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+type ConsumeFunc[J any] func(ctx context.Context, job J) error
+
 type Marshaler[J any] interface {
 	Marshal(J) ([]byte, error)
 	Unmarshal([]byte) (J, error)
@@ -17,6 +19,26 @@ type Queue[J any] struct {
 
 	name      string
 	marshaler Marshaler[J]
+}
+
+type consumeOpt func(params *ConsumeParams)
+
+func PoolSize(poolSize int) consumeOpt {
+	return func(params *ConsumeParams) {
+		params.PoolSize = poolSize
+	}
+}
+
+func VisibilityTimeout(timeout time.Duration) consumeOpt {
+	return func(params *ConsumeParams) {
+		params.VisibilityTimeout = int64(timeout.Seconds())
+	}
+}
+
+func OnEmptySleep(sleepDuration time.Duration) consumeOpt {
+	return func(params *ConsumeParams) {
+		params.OnEmptySleep = sleepDuration
+	}
 }
 
 type queueOptions struct {
@@ -38,7 +60,7 @@ func DedupeKey(key DedupingKey) queueOption {
 	}
 }
 
-func newQueue[J any](q *Queries, name string, marshaler Marshaler[J]) *Queue[J] {
+func NewQueue[J any](q *Queries, name string, marshaler Marshaler[J]) *Queue[J] {
 	return &Queue[J]{
 		Queries:   q,
 		name:      name,
@@ -70,7 +92,28 @@ func (q Queue[J]) Put(ctx context.Context, jobItem J, opts ...queueOption) error
 	return err
 }
 
-func (q *Queue[J]) Consume(ctx context.Context, in chan J) {
+func (q *Queue[J]) Consume(ctx context.Context, consumer ConsumeFunc[J], consumeOpts ...consumeOpt) error {
+	worker := func(consumer ConsumeFunc[J]) func(context.Context, *Job) error {
+		return func(ctx context.Context, j *Job) error {
+			jobItem, err := q.marshaler.Unmarshal(j.Job)
+			if err != nil {
+				return fmt.Errorf("failed to unmarshal job item: %w", err)
+			}
+			return consumer(ctx, jobItem)
+		}
+	}(consumer)
+	params := &ConsumeParams{
+		Queue:  q.name,
+		Worker: worker,
+	}
+
+	for _, opt := range consumeOpts {
+		opt(params)
+	}
+	return q.Queries.Consume(ctx, *params)
+}
+
+func (q *Queue[J]) ConsumeChan(ctx context.Context, in chan J) {
 	go func(ctx context.Context, q *Queue[J], in chan J) {
 		// TODO handle error
 		q.Queries.Consume(ctx, ConsumeParams{

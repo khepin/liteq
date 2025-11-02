@@ -27,10 +27,10 @@ func TestBasicQueue(t *testing.T) {
 
 	ctx := context.Background()
 
-	queue := newQueue[testJobItem](jqeue, "t1", JSONMarshaler[testJobItem]{})
+	queue := NewQueue[testJobItem](jqeue, "t1", JSONMarshaler[testJobItem]{})
 
 	inChan := make(chan testJobItem, 1)
-	queue.Consume(ctx, inChan)
+	queue.ConsumeChan(ctx, inChan)
 
 	err = queue.Put(ctx, testJobItem{ID: 5})
 	require.NoError(t, err)
