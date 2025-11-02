@@ -43,22 +43,17 @@ func OnEmptySleep(sleepDuration time.Duration) consumeOpt {
 	}
 }
 
-type queueOptions struct {
-	executeAfter time.Duration
-	dedupingKey  DedupingKey
-}
-
-type queueOption func(qOpts *queueOptions)
+type queueOption func(qOpts *QueueJobParams)
 
 func ExecuteAfter(after time.Duration) queueOption {
-	return func(qOpts *queueOptions) {
-		qOpts.executeAfter = after
+	return func(qOpts *QueueJobParams) {
+		qOpts.ExecuteAfter = time.Now().Add(after).Unix()
 	}
 }
 
 func DedupeKey(key DedupingKey) queueOption {
-	return func(qOpts *queueOptions) {
-		qOpts.dedupingKey = key
+	return func(qOpts *QueueJobParams) {
+		qOpts.DedupingKey = key
 	}
 }
 
@@ -71,26 +66,21 @@ func NewQueue[J any](q *Queries, name string, marshaler Marshaler[J]) *Queue[J] 
 }
 
 func (q Queue[J]) Put(ctx context.Context, jobItem J, opts ...queueOption) error {
-	qOpts := &queueOptions{
-		executeAfter: time.Millisecond * 0,
-		dedupingKey:  nil,
-	}
-
-	for _, opt := range opts {
-		opt(qOpts)
-	}
-
 	marhaledItem, err := q.marshaler.Marshal(jobItem)
 	if err != nil {
 		return fmt.Errorf("failed to marshal Job item: %w", err)
 	}
-	err = q.Queries.QueueJob(ctx, QueueJobParams{
-		Queue:             q.name,
-		ExecuteAfter:      time.Now().Add(qOpts.executeAfter).Unix(),
-		DedupingKey:       qOpts.dedupingKey,
-		RemainingAttempts: 1,
-		Job:               marhaledItem,
-	})
+
+	params := &QueueJobParams{
+		Queue: q.name,
+		Job:   marhaledItem,
+	}
+
+	for _, opt := range opts {
+		opt(params)
+	}
+
+	err = q.Queries.QueueJob(ctx, *params)
 	return err
 }
 
