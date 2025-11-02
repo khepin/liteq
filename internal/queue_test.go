@@ -38,3 +38,14 @@ func TestBasicQueue(t *testing.T) {
 	receivedItem := <-inChan
 	assert.Equal(t, 5, receivedItem.ID)
 }
+
+func TestGOBMarshaler(t *testing.T) {
+	marshaler := GOBMarshaler[testJobItem]{}
+
+	dataBytes, err := marshaler.Marshal(testJobItem{ID: 12})
+	require.NoError(t, err)
+
+	jobItem, err := marshaler.Unmarshal(dataBytes)
+	require.NoError(t, err)
+	assert.Equal(t, 12, jobItem.ID)
+}

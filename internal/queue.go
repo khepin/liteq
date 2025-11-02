@@ -1,7 +1,9 @@
 package internal
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -141,5 +143,22 @@ func (j JSONMarshaler[J]) Marshal(item J) ([]byte, error) {
 func (j JSONMarshaler[J]) Unmarshal(dataBytes []byte) (J, error) {
 	item := new(J)
 	err := json.Unmarshal(dataBytes, item)
+	return *item, err
+}
+
+type GOBMarshaler[J any] struct{}
+
+func (g GOBMarshaler[J]) Marshal(item J) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	encoder := gob.NewEncoder(buf)
+	err := encoder.Encode(item)
+	return buf.Bytes(), err
+}
+
+func (g GOBMarshaler[J]) Unmarshal(dataBytes []byte) (J, error) {
+	buf := bytes.NewBuffer(dataBytes)
+	decoder := gob.NewDecoder(buf)
+	item := new(J)
+	err := decoder.Decode(&item)
 	return *item, err
 }
