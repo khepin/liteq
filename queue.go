@@ -1,4 +1,4 @@
-package internal
+package liteq
 
 import (
 	"bytes"
@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/khepin/liteq/internal"
 )
 
 type ConsumeFunc[J any] func(ctx context.Context, job J) error
@@ -17,55 +19,61 @@ type Marshaler[J any] interface {
 }
 
 type Queue[J any] struct {
-	*Queries
+	*internal.Queries
 
 	name      string
 	marshaler Marshaler[J]
 }
 
-type consumeOpt func(params *ConsumeParams)
+type ConsumeOpt func(params *ConsumeParams)
 
-func PoolSize(poolSize int) consumeOpt {
+func PoolSize(poolSize int) ConsumeOpt {
 	return func(params *ConsumeParams) {
 		params.PoolSize = poolSize
 	}
 }
 
-func VisibilityTimeout(timeout time.Duration) consumeOpt {
+func VisibilityTimeout(timeout time.Duration) ConsumeOpt {
 	return func(params *ConsumeParams) {
 		params.VisibilityTimeout = int64(timeout.Seconds())
 	}
 }
 
-func OnEmptySleep(sleepDuration time.Duration) consumeOpt {
+func OnEmptySleep(sleepDuration time.Duration) ConsumeOpt {
 	return func(params *ConsumeParams) {
 		params.OnEmptySleep = sleepDuration
 	}
 }
 
-type queueOption func(qOpts *QueueJobParams)
+type QueueOption func(qOpts *QueueJobParams)
 
-func ExecuteAfter(after time.Duration) queueOption {
+func ExecuteAfter(after time.Duration) QueueOption {
 	return func(qOpts *QueueJobParams) {
 		qOpts.ExecuteAfter = time.Now().Add(after).Unix()
 	}
 }
 
-func DedupeKey(key DedupingKey) queueOption {
+func DedupeKey(key DedupingKey) QueueOption {
 	return func(qOpts *QueueJobParams) {
 		qOpts.DedupingKey = key
 	}
 }
 
-func NewQueue[J any](q *Queries, name string, marshaler Marshaler[J]) *Queue[J] {
+func Retries(retries int) QueueOption {
+	return func(qOpts *QueueJobParams) {
+		qOpts.RemainingAttempts = int64(retries)
+	}
+}
+
+func NewQueue[J any](jq *JobQueue, name string, marshaler Marshaler[J]) *Queue[J] {
 	return &Queue[J]{
-		Queries:   q,
+		Queries:   jq.queries,
 		name:      name,
 		marshaler: marshaler,
 	}
 }
 
-func (q Queue[J]) Put(ctx context.Context, jobItem J, opts ...queueOption) error {
+func (q Queue[J]) Put(ctx context.Context, jobItem J, opts ...QueueOption) error {
 	marhaledItem, err := q.marshaler.Marshal(jobItem)
 	if err != nil {
 		return fmt.Errorf("failed to marshal Job item: %w", err)
@@ -84,7 +92,7 @@ func (q Queue[J]) Put(ctx context.Context, jobItem J, opts ...queueOption) error
 	return err
 }
 
-func (q *Queue[J]) Consume(ctx context.Context, consumer ConsumeFunc[J], consumeOpts ...consumeOpt) error {
+func (q *Queue[J]) Consume(ctx context.Context, consumer ConsumeFunc[J], consumeOpts ...ConsumeOpt) error {
 	worker := func(consumer ConsumeFunc[J]) func(context.Context, *Job) error {
 		return func(ctx context.Context, j *Job) error {
 			jobItem, err := q.marshaler.Unmarshal(j.Job)

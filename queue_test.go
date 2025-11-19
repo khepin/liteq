@@ -1,4 +1,4 @@
-package internal
+package liteq
 
 import (
 	"context"
@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/khepin/liteq/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type testJobItem struct {
@@ -21,7 +24,7 @@ func TestBasicQueue(t *testing.T) {
 	defer os.Remove(dbPath)
 	db, err := sql.Open("sqlite3", dbPath)
 	require.NoError(t, err)
-	_, err = db.Exec(Schema)
+	_, err = db.Exec(internal.Schema)
 	require.NoError(t, err)
 
 	jqeue := New(db)
@@ -56,7 +59,7 @@ func BenchmarkJSONQueue(b *testing.B) {
 	defer os.Remove(dbPath)
 	db, err := sql.Open("sqlite3", dbPath)
 	require.NoError(b, err)
-	_, err = db.Exec(Schema)
+	_, err = db.Exec(internal.Schema)
 	require.NoError(b, err)
 
 	jqeue := New(db)
@@ -87,7 +90,7 @@ func BenchmarkGOBQueue(b *testing.B) {
 	defer os.Remove(dbPath)
 	db, err := sql.Open("sqlite3", dbPath)
 	require.NoError(b, err)
-	_, err = db.Exec(Schema)
+	_, err = db.Exec(internal.Schema)
 	require.NoError(b, err)
 
 	jqeue := New(db)
