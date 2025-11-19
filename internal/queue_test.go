@@ -51,7 +51,7 @@ func TestGOBMarshaler(t *testing.T) {
 	assert.Equal(t, 12, jobItem.ID)
 }
 
-func BenchmarkQueue(b *testing.B) {
+func BenchmarkJSONQueue(b *testing.B) {
 	dbPath := filepath.Join(b.TempDir(), "sqlite.db")
 	defer os.Remove(dbPath)
 	db, err := sql.Open("sqlite3", dbPath)
@@ -61,8 +61,40 @@ func BenchmarkQueue(b *testing.B) {
 
 	jqeue := New(db)
 	queue := NewQueue[*testJobItem](jqeue, "t1", JSONMarshaler[*testJobItem]{})
-
+	b.ReportAllocs()
 	for b.Loop() {
+		ctx, cancel := context.WithCancel(context.Background())
+		maxItems := 10000
+		go func(queue *Queue[*testJobItem]) {
+			for i := 0; i < maxItems; i++ {
+				ctx := context.Background()
+				queue.Put(ctx, &testJobItem{
+					ID: i,
+				})
+			}
+		}(queue)
+		queue.Consume(ctx, func(ctx context.Context, job *testJobItem) error {
+			if job.ID == maxItems-1 {
+				cancel()
+			}
+			return nil
+		}, PoolSize(5), OnEmptySleep(time.Millisecond*10))
+	}
+}
+
+func BenchmarkGOBQueue(b *testing.B) {
+	dbPath := filepath.Join(b.TempDir(), "sqlite.db")
+	defer os.Remove(dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(b, err)
+	_, err = db.Exec(Schema)
+	require.NoError(b, err)
+
+	jqeue := New(db)
+	queue := NewQueue[*testJobItem](jqeue, "t1", GOBMarshaler[*testJobItem]{})
+	b.ReportAllocs()
+	for b.Loop() {
+
 		ctx, cancel := context.WithCancel(context.Background())
 		maxItems := 10000
 		go func(queue *Queue[*testJobItem]) {
