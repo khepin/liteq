@@ -18,7 +18,7 @@ schema-const:
 	echo "\`" >> internal/schema.go
 
 
-.PHONY: bench
+.PHONY: bench test
 bench:
 	make cleanup
 	make schema-const
@@ -27,3 +27,6 @@ bench:
 
 cleanup:
 	rm -f bench/bench.db*
+
+test:
+	go test -v ./...
