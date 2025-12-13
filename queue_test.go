@@ -27,7 +27,8 @@ func TestBasicQueue(t *testing.T) {
 	_, err = db.Exec(internal.Schema)
 	require.NoError(t, err)
 
-	jqeue := New(db)
+	jqeue, err := New(db)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 
@@ -62,7 +63,8 @@ func BenchmarkJSONQueue(b *testing.B) {
 	_, err = db.Exec(internal.Schema)
 	require.NoError(b, err)
 
-	jqeue := New(db)
+	jqeue, err := New(db)
+	require.NoError(b, err)
 	queue := NewQueue[*testJobItem](jqeue, "t1", JSONMarshaler[*testJobItem]{})
 	b.ReportAllocs()
 	for b.Loop() {
@@ -93,7 +95,8 @@ func BenchmarkGOBQueue(b *testing.B) {
 	_, err = db.Exec(internal.Schema)
 	require.NoError(b, err)
 
-	jqeue := New(db)
+	jqeue, err := New(db)
+	require.NoError(b, err)
 	queue := NewQueue[*testJobItem](jqeue, "t1", GOBMarshaler[*testJobItem]{})
 	b.ReportAllocs()
 	for b.Loop() {

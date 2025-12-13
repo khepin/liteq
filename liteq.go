@@ -13,9 +13,20 @@ func Setup(db *sql.DB) error {
 	return err
 }
 
-func New(db *sql.DB) *JobQueue {
+func New(db *sql.DB) (*JobQueue, error) {
+	if err := Setup(db); err != nil {
+		return nil, err
+	}
 	queries := internal.New(db)
-	return &JobQueue{queries}
+	return &JobQueue{queries}, nil
+}
+
+func NewFromPath(dbPath string, queueName string) (*JobQueue, error) {
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	return New(db)
 }
 
 type JobQueue struct {

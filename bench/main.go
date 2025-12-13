@@ -21,7 +21,7 @@ func main() {
 		}
 		liteq.Setup(db)
 
-		jq := liteq.New(db)
+		jq, _ := liteq.New(db)
 
 		for i := 0; i < howMany; i++ {
 			jq.QueueJob(context.Background(), liteq.QueueJobParams{
@@ -39,7 +39,7 @@ func main() {
 		}
 		liteq.Setup(db)
 
-		jq := liteq.New(db)
+		jq, _ := liteq.New(db)
 
 		go func(i int) {
 			err := jq.Consume(context.Background(), liteq.ConsumeParams{
