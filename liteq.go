@@ -21,7 +21,7 @@ func New(db *sql.DB) (*JobQueue, error) {
 	return &JobQueue{queries}, nil
 }
 
-func NewFromPath(dbPath string, queueName string) (*JobQueue, error) {
+func NewFromPath(dbPath string) (*JobQueue, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
