@@ -19,7 +19,7 @@ type Marshaler[J any] interface {
 }
 
 type Queue[J any] struct {
-	*internal.Queries
+	iq *internal.Queries
 
 	name      string
 	marshaler Marshaler[J]
@@ -67,7 +67,7 @@ func Retries(retries int) QueueOption {
 
 func NewQueue[J any](jq *JobQueue, name string, marshaler Marshaler[J]) *Queue[J] {
 	return &Queue[J]{
-		Queries:   jq.queries,
+		iq:        jq.queries,
 		name:      name,
 		marshaler: marshaler,
 	}
@@ -88,7 +88,7 @@ func (q Queue[J]) Put(ctx context.Context, jobItem J, opts ...QueueOption) error
 		opt(params)
 	}
 
-	err = q.Queries.QueueJob(ctx, *params)
+	err = q.iq.QueueJob(ctx, *params)
 	return err
 }
 
@@ -110,13 +110,13 @@ func (q *Queue[J]) Consume(ctx context.Context, consumer ConsumeFunc[J], consume
 	for _, opt := range consumeOpts {
 		opt(params)
 	}
-	return q.Queries.Consume(ctx, *params)
+	return q.iq.Consume(ctx, *params)
 }
 
 func (q *Queue[J]) ConsumeChan(ctx context.Context, in chan J) {
 	go func(ctx context.Context, q *Queue[J], in chan J) {
 		// TODO handle error
-		q.Queries.Consume(ctx, ConsumeParams{
+		q.iq.Consume(ctx, ConsumeParams{
 			Queue:             q.name,
 			PoolSize:          1,
 			VisibilityTimeout: 10,
