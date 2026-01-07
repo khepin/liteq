@@ -82,6 +82,7 @@ SET
     updated_at = unixepoch(),
     consumer_fetched_at = 0,
     remaining_attempts = MAX(remaining_attempts - 1, 0),
+    execute_after = ?,
     errors = ?
 WHERE
     id = ?;

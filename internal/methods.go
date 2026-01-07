@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -139,14 +140,18 @@ func (q *Queries) Consume(ctx context.Context, params ConsumeParams) error {
 		}
 
 		for _, job := range jobs {
-			job := job
 			workers.Submit(func() {
 				err := params.Worker(ctx, job)
 				if err != nil {
-					q.FailJob(ctx, FailJobParams{
+					workerErr := &WorkerError{}
+					failJobParams := FailJobParams{
 						ID:     job.ID,
 						Errors: ErrorList(append(job.Errors, err.Error())),
-					})
+					}
+					if errors.As(err, &workerErr) {
+						failJobParams.ExecuteAfter = time.Now().Add(workerErr.DelayRetry).Unix()
+					}
+					q.FailJob(ctx, failJobParams)
 					return
 				}
 
