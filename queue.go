@@ -99,6 +99,9 @@ func (q *Queue[J]) Consume(ctx context.Context, consumer ConsumeFunc[J], consume
 			if err != nil {
 				return fmt.Errorf("failed to unmarshal job item: %w", err)
 			}
+			ctx = context.WithValue(ctx, CtxJobRemainingAttempts, j.RemainingAttempts)
+			ctx = context.WithValue(ctx, CtxJobCreatedAt, timeFromUnix(j.CreatedAt))
+			ctx = context.WithValue(ctx, CtxJobLastUpdated, timeFromUnix(j.UpdatedAt))
 			return consumer(ctx, jobItem)
 		}
 	}(consumer)

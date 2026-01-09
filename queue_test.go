@@ -56,6 +56,36 @@ func TestGOBMarshaler(t *testing.T) {
 	assert.Equal(t, 12, jobItem.ID)
 }
 
+func TestAccessContextVars(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "sqlite.db")
+	defer os.Remove(dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	_, err = db.Exec(internal.Schema)
+	require.NoError(t, err)
+
+	jqeue, err := New(db)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+	queue := NewQueue(jqeue, "t1", JSONMarshaler[testJobItem]{})
+	queue.Put(ctx, testJobItem{}, Retries(2))
+
+	remainingAttemptsChan := make(chan interface{})
+
+	go func() {
+		queue.Consume(ctx, func(ctx context.Context, job testJobItem) error {
+			remainingAttemptsChan <- ctx.Value(CtxJobRemainingAttempts).(int64)
+			return nil
+		})
+	}()
+	remainingAttemptsVal := <-remainingAttemptsChan
+	remainingAttempts, ok := remainingAttemptsVal.(int64)
+	require.True(t, ok)
+	assert.Equal(t, int64(2), remainingAttempts)
+}
+
 func TestDelayFailedJobRetry(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sqlite.db")
 	defer os.Remove(dbPath)
