@@ -7,12 +7,14 @@ type WorkerErrorOpt func(*WorkerError)
 type WorkerError struct {
 	cause error
 
-	DelayRetry time.Duration
+	DelayRetry        time.Duration
+	RemainingAttempts *int
 }
 
 func NewWorkerError(cause error, opts ...WorkerErrorOpt) *WorkerError {
 	w := &WorkerError{
-		cause: cause,
+		cause:             cause,
+		RemainingAttempts: nil,
 	}
 	for _, opt := range opts {
 		opt(w)

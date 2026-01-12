@@ -81,7 +81,7 @@ SET
     finished_at = 0,
     updated_at = unixepoch(),
     consumer_fetched_at = 0,
-    remaining_attempts = MAX(remaining_attempts - 1, 0),
+    remaining_attempts = ?,
     execute_after = ?,
     errors = ?
 WHERE

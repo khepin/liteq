@@ -38,7 +38,7 @@ SET
     finished_at = 0,
     updated_at = unixepoch(),
     consumer_fetched_at = 0,
-    remaining_attempts = MAX(remaining_attempts - 1, 0),
+    remaining_attempts = ?,
     execute_after = ?,
     errors = ?
 WHERE
@@ -46,13 +46,19 @@ WHERE
 `
 
 type FailJobParams struct {
-	ExecuteAfter int64
-	Errors       ErrorList
-	ID           int64
+	RemainingAttempts int64
+	ExecuteAfter      int64
+	Errors            ErrorList
+	ID                int64
 }
 
 func (q *Queries) FailJob(ctx context.Context, arg FailJobParams) error {
-	_, err := q.db.ExecContext(ctx, failJob, arg.ExecuteAfter, arg.Errors, arg.ID)
+	_, err := q.db.ExecContext(ctx, failJob,
+		arg.RemainingAttempts,
+		arg.ExecuteAfter,
+		arg.Errors,
+		arg.ID,
+	)
 	return err
 }
 
