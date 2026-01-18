@@ -1,4 +1,4 @@
-module github.com/khepin/liteq
+module github.com/dereulenspiegel/liteq
 
 go 1.25
 

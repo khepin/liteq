@@ -3,7 +3,7 @@ package liteq
 import (
 	"time"
 
-	"github.com/khepin/liteq/internal"
+	"github.com/dereulenspiegel/liteq/internal"
 )
 
 func WithRetryDelay(delay time.Duration) internal.WorkerErrorOpt {

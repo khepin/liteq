@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/khepin/liteq/internal"
+	"github.com/dereulenspiegel/liteq/internal"
 )
 
 // Creates the db file with the tables and indexes

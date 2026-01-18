@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/khepin/liteq/internal"
+	"github.com/dereulenspiegel/liteq/internal"
 	"github.com/matryer/is"
 	_ "github.com/mattn/go-sqlite3"
 )

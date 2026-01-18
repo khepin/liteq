@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/khepin/liteq/internal"
+	"github.com/dereulenspiegel/liteq/internal"
 )
 
 type ConsumeFunc[J any] func(ctx context.Context, job J) error

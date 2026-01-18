@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/khepin/liteq/internal"
+	"github.com/dereulenspiegel/liteq/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
