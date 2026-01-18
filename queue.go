@@ -73,7 +73,11 @@ func NewQueue[J any](jq *JobQueue, name string, marshaler Marshaler[J]) *Queue[J
 	}
 }
 
-func (q Queue[J]) Put(ctx context.Context, jobItem J, opts ...QueueOption) error {
+func (q *Queue[J]) Queue(ctx context.Context, jobItem J, opts ...QueueOption) error {
+	return q.Put(ctx, jobItem, opts...)
+}
+
+func (q *Queue[J]) Put(ctx context.Context, jobItem J, opts ...QueueOption) error {
 	marhaledItem, err := q.marshaler.Marshal(jobItem)
 	if err != nil {
 		return fmt.Errorf("failed to marshal Job item: %w", err)
