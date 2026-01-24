@@ -103,6 +103,7 @@ type ConsumeParams struct {
 
 func (q *Queries) Consume(ctx context.Context, params ConsumeParams) error {
 	workers := pond.New(params.PoolSize, params.PoolSize)
+	defer workers.StopAndWait()
 	sleep := params.OnEmptySleep
 	if sleep == 0 {
 		sleep = 1 * time.Second
