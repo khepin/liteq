@@ -8,14 +8,14 @@ import (
 	"time"
 
 	"github.com/khepin/liteq"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func main() {
 	howMany := 100_000
 
 	go func() {
-		db, err := sql.Open("sqlite3", "bench.db")
+		db, err := sql.Open("sqlite", "bench.db")
 		if err != nil {
 			panic(err)
 		}
@@ -33,7 +33,7 @@ func main() {
 
 	c := make(chan struct{})
 	for i := 0; i < 30; i++ {
-		db, err := sql.Open("sqlite3", "bench.db")
+		db, err := sql.Open("sqlite", "bench.db")
 		if err != nil {
 			panic(err)
 		}

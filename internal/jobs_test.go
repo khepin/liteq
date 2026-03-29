@@ -11,7 +11,7 @@ import (
 
 	"github.com/khepin/liteq/internal"
 	"github.com/matryer/is"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func TestMain(m *testing.M) {
@@ -39,7 +39,11 @@ func getDb(file string) (*sql.DB, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite3", file)
+	dsn := file + "?_pragma=busy_timeout(5000)"
+	if file == ":memory:" {
+		dsn = ":memory:?_pragma=busy_timeout(5000)"
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
