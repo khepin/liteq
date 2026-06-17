@@ -1,6 +1,6 @@
 PRAGMA journal_mode = WAL;
 
-CREATE TABLE jobs (
+CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER NOT NULL,
     queue TEXT NOT NULL,
     job TEXT NOT NULL,
@@ -16,12 +16,12 @@ CREATE TABLE jobs (
     PRIMARY KEY (id)
 );
 
-CREATE INDEX todo ON jobs (queue, job_status, execute_after)
+CREATE INDEX IF NOT EXISTS todo ON jobs (queue, job_status, execute_after)
 WHERE
     job_status = 'queued'
     OR job_status = 'fetched';
 
-CREATE UNIQUE INDEX dedupe ON jobs (deduping_key, job_status)
+CREATE UNIQUE INDEX IF NOT EXISTS dedupe ON jobs (deduping_key, job_status)
 WHERE
     deduping_key != ''
     AND job_status = 'queued';
