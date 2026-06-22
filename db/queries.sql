@@ -106,6 +106,16 @@ WHERE
             AND js.job_status = 'queued'
             AND js.execute_after <= ?
             AND js.remaining_attempts > 0
+            AND (
+                js.deduping_key = ''
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM jobs jd
+                    WHERE jd.deduping_key = js.deduping_key
+                    AND jd.deduping_key != '' -- ensure we match the index
+                    AND jd.job_status = 'fetched'
+                )
+            )
         ORDER BY
             execute_after ASC
         LIMIT

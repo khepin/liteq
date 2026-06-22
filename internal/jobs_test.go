@@ -410,6 +410,92 @@ func Test_DedupeIgnore(t *testing.T) {
 	is.Equal(jobs[0].Job, `job:1`) // expected job:1
 }
 
+// A job whose deduping key matches an already-fetched (in-flight) job must not
+// be grabbed until that in-flight job finishes. The key doubles as a concurrency key.
+func Test_DedupeConcurrencyKey(t *testing.T) {
+	is := is.New(t)
+	jqueue, err := getJqueue("jobs.db")
+	is.NoErr(err) // error getting job queue
+
+	// Queue and grab job:1 — it is now 'fetched' (in flight).
+	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+		Queue:       "",
+		Job:         `job:1`,
+		DedupingKey: internal.IgnoreDuplicate("dedupe"),
+	})
+	is.NoErr(err) // error queuing job:1
+
+	jobs, err := jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{
+		Queue: "",
+		Count: 10,
+	})
+	is.NoErr(err)                  // error grabbing job:1
+	is.Equal(len(jobs), 1)         // expected job:1 fetched
+	is.Equal(jobs[0].Job, `job:1`) // expected job:1
+	job1 := jobs[0]
+
+	// job:1 is 'fetched' (not 'queued'), so the queued-uniqueness index lets job:2
+	// in with the same key.
+	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+		Queue:       "",
+		Job:         `job:2`,
+		DedupingKey: internal.IgnoreDuplicate("dedupe"),
+	})
+	is.NoErr(err) // error queuing job:2
+
+	// job:2 must stay invisible while job:1 is in flight.
+	jobs, err = jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{
+		Queue: "",
+		Count: 10,
+	})
+	is.NoErr(err)          // error grabbing while in flight
+	is.Equal(len(jobs), 0) // expected no job: same key still in flight
+
+	// Once job:1 completes, job:2 becomes grabbable.
+	err = jqueue.CompleteJob(context.Background(), job1.ID)
+	is.NoErr(err) // error completing job:1
+
+	jobs, err = jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{
+		Queue: "",
+		Count: 10,
+	})
+	is.NoErr(err)                  // error grabbing job:2
+	is.Equal(len(jobs), 1)         // expected job:2 now available
+	is.Equal(jobs[0].Job, `job:2`) // expected job:2
+}
+
+// Jobs without a deduping key have no concurrency relationship: one being in
+// flight must not block grabbing the others.
+func Test_ConcurrencyEmptyKeyNotBlocked(t *testing.T) {
+	is := is.New(t)
+	jqueue, err := getJqueue("jobs.db")
+	is.NoErr(err) // error getting job queue
+
+	for i := 0; i < 2; i++ {
+		err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+			Queue: "",
+			Job:   fmt.Sprintf("job:%d", i),
+		})
+		is.NoErr(err) // error queuing job
+	}
+
+	// Grab one — it is now in flight with an empty key.
+	jobs, err := jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{
+		Queue: "",
+		Count: 1,
+	})
+	is.NoErr(err)          // error grabbing first job
+	is.Equal(len(jobs), 1) // expected 1 job
+
+	// The other empty-key job must still be grabbable.
+	jobs, err = jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{
+		Queue: "",
+		Count: 10,
+	})
+	is.NoErr(err)          // error grabbing second job
+	is.Equal(len(jobs), 1) // expected the other job, not blocked by the in-flight one
+}
+
 func Test_DedupeReplace(t *testing.T) {
 	is := is.New(t)
 	jqueue, err := getJqueue("jobs.db")
