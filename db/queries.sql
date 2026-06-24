@@ -76,6 +76,17 @@ UPDATE
 SET
     job_status = CASE
         WHEN remaining_attempts <= 1 THEN 'failed'
+        -- if we can't put the job back on the queue due to the unique index
+        -- on deduping key, fail this job. the next one is already queued and
+        -- will pick up
+        WHEN deduping_key != '' AND EXISTS (
+            SELECT 1
+            FROM jobs sib
+            WHERE sib.deduping_key = jobs.deduping_key
+            AND sib.deduping_key != ''
+            AND sib.job_status = 'queued'
+            AND sib.id != jobs.id
+        ) THEN 'failed'
         ELSE 'queued'
     END,
     finished_at = 0,
@@ -84,7 +95,7 @@ SET
     remaining_attempts = MAX(remaining_attempts - 1, 0),
     errors = ?
 WHERE
-    id = ?;
+    jobs.id = ?;
 
 -- name: MarkJobsForConsumer :many
 UPDATE

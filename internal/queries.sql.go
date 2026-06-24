@@ -33,6 +33,16 @@ UPDATE
 SET
     job_status = CASE
         WHEN remaining_attempts <= 1 THEN 'failed'
+        -- Yield to a same-key sibling that's already queued: re-queuing here would
+        -- violate the dedupe unique index. The sibling will do the key's work.
+        WHEN deduping_key != '' AND EXISTS (
+            SELECT 1
+            FROM jobs sib
+            WHERE sib.deduping_key = jobs.deduping_key
+            AND sib.deduping_key != ''
+            AND sib.job_status = 'queued'
+            AND sib.id != jobs.id
+        ) THEN 'failed'
         ELSE 'queued'
     END,
     finished_at = 0,
@@ -41,7 +51,7 @@ SET
     remaining_attempts = MAX(remaining_attempts - 1, 0),
     errors = ?
 WHERE
-    id = ?
+    jobs.id = ?
 `
 
 type FailJobParams struct {
