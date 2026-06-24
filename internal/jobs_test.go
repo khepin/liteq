@@ -576,6 +576,48 @@ func Test_DedupeResetYieldsToSibling(t *testing.T) {
 	is.Equal(jobs[0].Job, `job:2`) // expected job:2
 }
 
+// The deduping/concurrency key is scoped per queue: the same key in two
+// different queues must not dedupe against each other, and an in-flight job in
+// one queue must not block a same-key job in another queue.
+func Test_DedupeScopedToQueue(t *testing.T) {
+	is := is.New(t)
+	jqueue, err := getJqueue("jobs.db")
+	is.NoErr(err) // error getting job queue
+
+	// Same key, different queues — both must be accepted (no cross-queue dedupe).
+	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+		Queue:       "emails",
+		Job:         `email`,
+		DedupingKey: internal.IgnoreDuplicate("user:42"),
+	})
+	is.NoErr(err) // error queuing emails job
+	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+		Queue:       "billing",
+		Job:         `bill`,
+		DedupingKey: internal.IgnoreDuplicate("user:42"),
+	})
+	is.NoErr(err) // error queuing billing job
+
+	// Grab the emails job — it is now in flight with key user:42.
+	emails, err := jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{
+		Queue: "emails",
+		Count: 10,
+	})
+	is.NoErr(err)            // error grabbing emails
+	is.Equal(len(emails), 1) // expected the emails job
+	is.Equal(emails[0].Job, `email`)
+
+	// The billing job has the same key but a different queue, so the in-flight
+	// emails job must not block it.
+	billing, err := jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{
+		Queue: "billing",
+		Count: 10,
+	})
+	is.NoErr(err)             // error grabbing billing
+	is.Equal(len(billing), 1) // expected the billing job, not blocked cross-queue
+	is.Equal(billing[0].Job, `bill`)
+}
+
 // Jobs without a deduping key have no concurrency relationship: one being in
 // flight must not block grabbing the others.
 func Test_ConcurrencyEmptyKeyNotBlocked(t *testing.T) {
