@@ -520,6 +520,62 @@ func Test_DedupeRetryYieldsToSibling(t *testing.T) {
 	is.Equal(jobs[0].Job, `job:2`) // expected job:2
 }
 
+// A visibility-timeout reset of a job whose same-key sibling is already queued
+// must yield (go terminal) instead of re-queuing into a dedupe collision.
+func Test_DedupeResetYieldsToSibling(t *testing.T) {
+	is := is.New(t)
+	jqueue, err := getJqueue("jobs.db")
+	is.NoErr(err) // error getting job queue
+
+	// Queue and grab job:1 with retries left — now in flight (fetched).
+	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+		Queue:             "",
+		Job:               `job:1`,
+		DedupingKey:       internal.IgnoreDuplicate("dedupe"),
+		RemainingAttempts: 3,
+	})
+	is.NoErr(err) // error queuing job:1
+
+	jobs, err := jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{
+		Queue: "",
+		Count: 10,
+	})
+	is.NoErr(err)          // error grabbing job:1
+	is.Equal(len(jobs), 1) // expected job:1 fetched
+	job1 := jobs[0]
+
+	// Queue job:2 with the same key while job:1 is in flight.
+	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+		Queue:       "",
+		Job:         `job:2`,
+		DedupingKey: internal.IgnoreDuplicate("dedupe"),
+	})
+	is.NoErr(err) // error queuing job:2
+
+	// Reset with a cutoff in the future so job:1 counts as timed out. With a
+	// queued sibling present, it must yield to 'failed' rather than collide.
+	rows, err := jqueue.ResetJobs(context.Background(), internal.ResetJobsParams{
+		Queue:             "",
+		ConsumerFetchedAt: time.Now().Unix() + 100,
+	})
+	is.NoErr(err)            // ResetJobs must not hit a unique constraint violation
+	is.Equal(rows, int64(1)) // expected job:1 reset
+
+	timedOut, err := jqueue.FindJob(context.Background(), job1.ID)
+	is.NoErr(err)                          // error finding job:1
+	is.Equal(timedOut.JobStatus, "failed") // job:1 yielded to the sibling
+	is.Equal(timedOut.Errors, internal.ErrorList{"visibility timeout expired"})
+
+	// The sibling job:2 is now grabbable.
+	jobs, err = jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{
+		Queue: "",
+		Count: 10,
+	})
+	is.NoErr(err)                  // error grabbing job:2
+	is.Equal(len(jobs), 1)         // expected job:2 available
+	is.Equal(jobs[0].Job, `job:2`) // expected job:2
+}
+
 // Jobs without a deduping key have no concurrency relationship: one being in
 // flight must not block grabbing the others.
 func Test_ConcurrencyEmptyKeyNotBlocked(t *testing.T) {

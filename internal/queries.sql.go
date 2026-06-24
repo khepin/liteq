@@ -33,8 +33,9 @@ UPDATE
 SET
     job_status = CASE
         WHEN remaining_attempts <= 1 THEN 'failed'
-        -- Yield to a same-key sibling that's already queued: re-queuing here would
-        -- violate the dedupe unique index. The sibling will do the key's work.
+        -- if we can't put the job back on the queue due to the unique index
+        -- on deduping key, fail this job. the next one is already queued and
+        -- will pick up
         WHEN deduping_key != '' AND EXISTS (
             SELECT 1
             FROM jobs sib
@@ -178,6 +179,17 @@ UPDATE
 SET
     job_status = CASE
         WHEN remaining_attempts <= 1 THEN 'failed'
+        -- if we can't put the job back on the queue due to the unique index
+        -- on deduping key, fail this job. the next one is already queued and
+        -- will pick up
+        WHEN deduping_key != '' AND EXISTS (
+            SELECT 1
+            FROM jobs sibling
+            WHERE sibling.deduping_key = jobs.deduping_key
+            AND sibling.deduping_key != ''
+            AND sibling.job_status = 'queued'
+            AND sibling.id != jobs.id
+        ) THEN 'failed'
         ELSE 'queued'
     END,
     updated_at = unixepoch(),
@@ -185,9 +197,9 @@ SET
     remaining_attempts = MAX(remaining_attempts - 1, 0),
     errors = json_insert(errors, '$[#]', 'visibility timeout expired')
 WHERE
-    job_status = 'fetched'
-    AND queue = ?
-    AND consumer_fetched_at < ?
+    jobs.job_status = 'fetched'
+    AND jobs.queue = ?
+    AND jobs.consumer_fetched_at < ?
 `
 
 type ResetJobsParams struct {
