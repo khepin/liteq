@@ -76,6 +76,17 @@ UPDATE
 SET
     job_status = CASE
         WHEN remaining_attempts <= 1 THEN 'failed'
+        -- if we can't put the job back on the queue due to the unique index
+        -- on deduping key, fail this job. the next one is already queued and
+        -- will pick up
+        WHEN deduping_key != '' AND EXISTS (
+            SELECT 1
+            FROM jobs sib
+            WHERE sib.deduping_key = jobs.deduping_key
+            AND sib.deduping_key != ''
+            AND sib.job_status = 'queued'
+            AND sib.id != jobs.id
+        ) THEN 'failed'
         ELSE 'queued'
     END,
     finished_at = 0,
@@ -84,7 +95,7 @@ SET
     remaining_attempts = MAX(remaining_attempts - 1, 0),
     errors = ?
 WHERE
-    id = ?;
+    jobs.id = ?;
 
 -- name: MarkJobsForConsumer :many
 UPDATE
@@ -106,6 +117,16 @@ WHERE
             AND js.job_status = 'queued'
             AND js.execute_after <= ?
             AND js.remaining_attempts > 0
+            AND (
+                js.deduping_key = ''
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM jobs jd
+                    WHERE jd.deduping_key = js.deduping_key
+                    AND jd.deduping_key != '' -- ensure we match the index
+                    AND jd.job_status = 'fetched'
+                )
+            )
         ORDER BY
             execute_after ASC
         LIMIT
@@ -118,6 +139,17 @@ UPDATE
 SET
     job_status = CASE
         WHEN remaining_attempts <= 1 THEN 'failed'
+        -- if we can't put the job back on the queue due to the unique index
+        -- on deduping key, fail this job. the next one is already queued and
+        -- will pick up
+        WHEN deduping_key != '' AND EXISTS (
+            SELECT 1
+            FROM jobs sibling
+            WHERE sibling.deduping_key = jobs.deduping_key
+            AND sibling.deduping_key != ''
+            AND sibling.job_status = 'queued'
+            AND sibling.id != jobs.id
+        ) THEN 'failed'
         ELSE 'queued'
     END,
     updated_at = unixepoch(),
@@ -125,9 +157,9 @@ SET
     remaining_attempts = MAX(remaining_attempts - 1, 0),
     errors = json_insert(errors, '$[#]', 'visibility timeout expired')
 WHERE
-    job_status = 'fetched'
-    AND queue = ?
-    AND consumer_fetched_at < ?;
+    jobs.job_status = 'fetched'
+    AND jobs.queue = ?
+    AND jobs.consumer_fetched_at < ?;
 
 -- name: FindJob :one
 SELECT

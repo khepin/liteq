@@ -21,7 +21,14 @@ WHERE
     job_status = 'queued'
     OR job_status = 'fetched';
 
+-- prevents 2 jobs with the same dedupe key from being 'queued' at the same time
 CREATE UNIQUE INDEX IF NOT EXISTS dedupe ON jobs (deduping_key, job_status)
 WHERE
     deduping_key != ''
     AND job_status = 'queued';
+
+-- prevents 2 jobs with the same dedupe key from being 'fetched' at the same time
+CREATE UNIQUE INDEX IF NOT EXISTS no_concurrent ON jobs (deduping_key)
+WHERE
+    deduping_key != ''
+    AND job_status = 'fetched';

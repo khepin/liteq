@@ -51,15 +51,17 @@ func (q *Queries) QueueJob(ctx context.Context, params QueueJobParams) error {
 		params.DedupingKey = IgnoreDuplicate("")
 	}
 
+	dedupingKey := params.DedupingKey.String()
+
 	doParams := doQueueJobIgnoreDupeParams{
 		Queue:             params.Queue,
 		Job:               params.Job,
 		ExecuteAfter:      params.ExecuteAfter,
 		RemainingAttempts: params.RemainingAttempts,
-		DedupingKey:       params.DedupingKey.String(),
+		DedupingKey:       scopeDedupingKey(params.Queue, dedupingKey),
 	}
 
-	if params.DedupingKey.String() == "" {
+	if dedupingKey == "" {
 		return q.doQueueJobIgnoreDupe(ctx, doParams)
 	}
 
@@ -68,6 +70,18 @@ func (q *Queries) QueueJob(ctx context.Context, params QueueJobParams) error {
 	}
 
 	return q.doQueueJobIgnoreDupe(ctx, doParams)
+}
+
+// Make the deduping key scoped to a single queue.
+// 2 jobs can have the same deduping key on different queues and still to in parallel
+func scopeDedupingKey(queue, key string) string {
+	if key == "" {
+		return ""
+	}
+	// length of queue ensures we don't have conflicts with
+	// queue=a:b key=c
+	// queue=a   key=b:c
+	return fmt.Sprintf("%d:%s:%s", len(queue), queue, key)
 }
 
 type GrabJobsParams struct {
