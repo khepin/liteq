@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     consumer_fetched_at INTEGER NOT NULL DEFAULT 0,
     finished_at INTEGER NOT NULL DEFAULT 0,
     deduping_key TEXT NOT NULL DEFAULT '',
-    errors TEXT NOT NULL DEFAULT "[]",
+    errors TEXT NOT NULL DEFAULT '[]',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (id)
