@@ -27,17 +27,27 @@ import (
 
 func main() {
     // Open the sqlite3 DB in the file "liteq.db"
-    liteqDb, err := sql.Open("sqlite3", "liteq.db")
+    liteqDb, err := sql.Open("sqlite3", "liteq.db?_busy_timeout=5000&_synchronous=NORMAL")
     if err != nil {
         fmt.Println(err)
         os.Exit(1)
     }
+    // SQLite allows a single writer and almost every liteq query is a write
+    liteqDb.SetMaxOpenConns(1)
     // Create the DB table if it doesn't exist
     liteq.Setup(liteqDb)
     // create a job queue
     jqueue := liteq.New(liteqDb)
 }
 ```
+
+#### Connection settings
+
+- `busy_timeout`: waits for the lock instead of failing with `SQLITE_BUSY` when another connection or process writes to the file. Without it, consumers stop with `database is locked`.
+- `synchronous=NORMAL`: no fsync on each commit, about 4x faster writes. In WAL mode, a power loss or OS crash (not an app crash) can lose the last committed jobs. Leave it out if that is not acceptable.
+- `SetMaxOpenConns(1)`: writers wait in Go instead of in SQLite's busy handler, which sleeps in steps of up to 100ms. Give liteq its own `*sql.DB` so this does not limit the rest of your app.
+
+With `modernc.org/sqlite`, the DSN is `liteq.db?_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)`.
 
 ### Queuing a job
 

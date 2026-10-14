@@ -70,6 +70,18 @@ SET
 WHERE
     id = ?;
 
+-- name: CompleteJobs :exec
+UPDATE
+    jobs
+SET
+    job_status = 'completed',
+    finished_at = unixepoch(),
+    updated_at = unixepoch(),
+    consumer_fetched_at = 0,
+    remaining_attempts = 0
+WHERE
+    id IN (sqlc.slice('ids'));
+
 -- name: FailJob :exec
 UPDATE
     jobs

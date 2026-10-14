@@ -7,6 +7,7 @@ package internal
 
 import (
 	"context"
+	"strings"
 )
 
 const completeJob = `-- name: CompleteJob :exec
@@ -24,6 +25,34 @@ WHERE
 
 func (q *Queries) CompleteJob(ctx context.Context, id int64) error {
 	_, err := q.db.ExecContext(ctx, completeJob, id)
+	return err
+}
+
+const completeJobs = `-- name: CompleteJobs :exec
+UPDATE
+    jobs
+SET
+    job_status = 'completed',
+    finished_at = unixepoch(),
+    updated_at = unixepoch(),
+    consumer_fetched_at = 0,
+    remaining_attempts = 0
+WHERE
+    id IN (/*SLICE:ids*/?)
+`
+
+func (q *Queries) CompleteJobs(ctx context.Context, ids []int64) error {
+	query := completeJobs
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	_, err := q.db.ExecContext(ctx, query, queryParams...)
 	return err
 }
 
