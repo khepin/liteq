@@ -8,9 +8,8 @@ sql:
         package: "internal"
         out: "internal"
         emit_result_struct_pointers: true
+        emit_prepared_queries: true
         overrides:
-          - column: jobs.consumer_id
-            go_type: "string"
           - column: jobs.errors
             go_type:
               import: ""

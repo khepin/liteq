@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     execute_after INTEGER NOT NULL DEFAULT 0,
     remaining_attempts INTEGER NOT NULL DEFAULT 1,
     consumer_fetched_at INTEGER NOT NULL DEFAULT 0,
+    consumer_id INTEGER NOT NULL DEFAULT 0,
     finished_at INTEGER NOT NULL DEFAULT 0,
     deduping_key TEXT NOT NULL DEFAULT '',
     errors TEXT NOT NULL DEFAULT '[]',

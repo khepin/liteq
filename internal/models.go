@@ -12,6 +12,7 @@ type Job struct {
 	ExecuteAfter      int64
 	RemainingAttempts int64
 	ConsumerFetchedAt int64
+	ConsumerID        int64
 	FinishedAt        int64
 	DedupingKey       string
 	Errors            ErrorList

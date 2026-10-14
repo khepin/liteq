@@ -27,13 +27,11 @@ import (
 
 func main() {
     // Open the sqlite3 DB in the file "liteq.db"
-    liteqDb, err := sql.Open("sqlite3", "liteq.db?_busy_timeout=5000&_synchronous=NORMAL")
+    liteqDb, err := sql.Open("sqlite3", "liteq.db?_busy_timeout=5000")
     if err != nil {
         fmt.Println(err)
         os.Exit(1)
     }
-    // SQLite allows a single writer and almost every liteq query is a write
-    liteqDb.SetMaxOpenConns(1)
     // Create the DB table if it doesn't exist
     liteq.Setup(liteqDb)
     // create a job queue
@@ -41,11 +39,14 @@ func main() {
 }
 ```
 
-#### Connection settings
+A `JobQueue` serializes its own writes, since SQLite allows a single writer. Use one `JobQueue` per DB file, shared by all producers and consumers. Call `jqueue.Close()` to release its prepared statements.
+
+#### Recommended connection settings
+
+liteq does not change your connection. Set these in the DSN when you open the DB:
 
 - `busy_timeout`: waits for the lock instead of failing with `SQLITE_BUSY` when another connection or process writes to the file. Without it, consumers stop with `database is locked`.
-- `synchronous=NORMAL`: no fsync on each commit, about 4x faster writes. In WAL mode, a power loss or OS crash (not an app crash) can lose the last committed jobs. Leave it out if that is not acceptable.
-- `SetMaxOpenConns(1)`: writers wait in Go instead of in SQLite's busy handler, which sleeps in steps of up to 100ms. Give liteq its own `*sql.DB` so this does not limit the rest of your app.
+- `synchronous=NORMAL` (optional): no fsync on each commit, about 4x faster writes. In WAL mode, a power loss or OS crash (not an app crash) can lose the last committed jobs.
 
 With `modernc.org/sqlite`, the DSN is `liteq.db?_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)`.
 
@@ -78,6 +79,7 @@ jqueue.Consume(context.Background(), liteq.ConsumeParams{
 - `context.Background()` You can pass in a cancellable context and the queue will stop processing when the context is canceled
 - `Queue` this is the name of the queue we want this consumer to consume from
 - `PoolSize` this is the number of concurrent consumer we want for this queue
+- `PrefetchCount` the number of jobs fetched ahead of the free workers, defaults to `4 * PoolSize`. Each fetch is a write, so a larger value gives more throughput for short jobs. The visibility timeout of a prefetched job is renewed until a worker starts it, so the timeout only counts the time the job runs.
 - `VisibilityTimeout` is the time that a job will remain reserved to a consumer. After that time has elapsed, if the job hasn't been marked either failed
 or successful, it will be put back in the queue for others to consume. The error will be added to the job's error list and the number of remaining attempts will be
 decreased.

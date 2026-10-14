@@ -80,7 +80,9 @@ SET
     consumer_fetched_at = 0,
     remaining_attempts = 0
 WHERE
-    id IN (sqlc.slice('ids'));
+    jobs.job_status = 'fetched'
+    AND jobs.consumer_id = sqlc.arg('consumer_id')
+    AND jobs.id IN (sqlc.slice('ids'));
 
 -- name: FailJob :exec
 UPDATE
@@ -107,12 +109,15 @@ SET
     remaining_attempts = MAX(remaining_attempts - 1, 0),
     errors = ?
 WHERE
-    jobs.id = ?;
+    jobs.id = ?
+    AND jobs.job_status = 'fetched'
+    AND jobs.consumer_id = ?;
 
 -- name: MarkJobsForConsumer :many
 UPDATE
     jobs
 SET
+    consumer_id = ?,
     consumer_fetched_at = unixepoch(),
     updated_at = unixepoch(),
     job_status = 'fetched'
@@ -172,6 +177,17 @@ WHERE
     jobs.job_status = 'fetched'
     AND jobs.queue = ?
     AND jobs.consumer_fetched_at < ?;
+
+-- name: RenewJobs :many
+UPDATE
+    jobs
+SET
+    consumer_fetched_at = sqlc.arg('renewed_at'),
+    updated_at = unixepoch()
+WHERE
+    jobs.job_status = 'fetched'
+    AND jobs.consumer_id = sqlc.arg('consumer_id')
+    AND jobs.id IN (sqlc.slice('ids')) RETURNING id;
 
 -- name: FindJob :one
 SELECT

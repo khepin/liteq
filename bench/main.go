@@ -17,10 +17,12 @@ func main() {
 	howMany := flag.Int("jobs", 100_000, "number of jobs")
 	queues := flag.Int("queues", 30, "number of queues")
 	poolSize := flag.Int("pool", 10, "workers per queue")
+	prefetch := flag.Int("prefetch", 0, "jobs fetched ahead of free workers, 0 for pool size")
 	maxSleep := flag.Int("sleep", 0, "max random worker sleep in ms")
 	sync := flag.String("sync", "NORMAL", "PRAGMA synchronous")
-	maxConns := flag.Int("conns", 1, "max open connections, 0 for unlimited")
+	maxConns := flag.Int("conns", 0, "max open connections, 0 for unlimited")
 	prefill := flag.Bool("prefill", false, "enqueue all jobs before consuming")
+	visibilityTimeout := flag.Int64("vt", 0, "visibility timeout in seconds")
 	flag.Parse()
 
 	db, err := sql.Open("sqlite", "file:bench.db?_pragma=busy_timeout(10000)&_pragma=synchronous("+*sync+")")
@@ -58,9 +60,11 @@ func main() {
 	for i := 0; i < *queues; i++ {
 		go func(i int) {
 			err := jq.Consume(context.Background(), liteq.ConsumeParams{
-				Queue:        fmt.Sprintf("default-%d", i),
-				PoolSize:     *poolSize,
-				OnEmptySleep: 10 * time.Millisecond,
+				Queue:             fmt.Sprintf("default-%d", i),
+				PoolSize:          *poolSize,
+				PrefetchCount:     *prefetch,
+				VisibilityTimeout: *visibilityTimeout,
+				OnEmptySleep:      10 * time.Millisecond,
 				Worker: func(ctx context.Context, job *liteq.Job) error {
 					if *maxSleep > 0 {
 						time.Sleep(time.Duration(rand.Intn(*maxSleep)) * time.Millisecond)

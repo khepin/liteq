@@ -2,14 +2,35 @@ package internal
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"database/sql/driver"
 
 	"github.com/alitto/pond"
 )
+
+// Queue serializes its own writes. SQLite has a single writer, and waiting on a
+// Go mutex is much cheaper than waiting in SQLite's busy handler.
+type Queue struct {
+	*Queries
+	writeMu sync.Mutex
+}
+
+func NewQueue(queries *Queries) *Queue {
+	return &Queue{Queries: queries}
+}
+
+func (q *Queue) write(f func() error) error {
+	q.writeMu.Lock()
+	defer q.writeMu.Unlock()
+	return f()
+}
 
 type QueueJobParams struct {
 	Queue             string
@@ -42,7 +63,7 @@ func (r ReplaceDuplicate) ReplaceDuplicate() bool {
 	return true
 }
 
-func (q *Queries) QueueJob(ctx context.Context, params QueueJobParams) error {
+func (q *Queue) QueueJob(ctx context.Context, params QueueJobParams) error {
 	if params.RemainingAttempts == 0 {
 		params.RemainingAttempts = 1
 	}
@@ -61,15 +82,17 @@ func (q *Queries) QueueJob(ctx context.Context, params QueueJobParams) error {
 		DedupingKey:       scopeDedupingKey(params.Queue, dedupingKey),
 	}
 
-	if dedupingKey == "" {
+	return q.write(func() error {
+		if dedupingKey == "" {
+			return q.doQueueJobIgnoreDupe(ctx, doParams)
+		}
+
+		if params.DedupingKey.ReplaceDuplicate() {
+			return q.doQueueJobReplaceDupe(ctx, doQueueJobReplaceDupeParams(doParams))
+		}
+
 		return q.doQueueJobIgnoreDupe(ctx, doParams)
-	}
-
-	if params.DedupingKey.ReplaceDuplicate() {
-		return q.doQueueJobReplaceDupe(ctx, doQueueJobReplaceDupeParams(doParams))
-	}
-
-	return q.doQueueJobIgnoreDupe(ctx, doParams)
+	})
 }
 
 // Make the deduping key scoped to a single queue.
@@ -86,11 +109,12 @@ func scopeDedupingKey(queue, key string) string {
 
 type GrabJobsParams struct {
 	Queue        string
+	ConsumerID   int64
 	ExecuteAfter int64
 	Count        int64
 }
 
-func (q *Queries) GrabJobs(ctx context.Context, params GrabJobsParams) ([]*Job, error) {
+func (q *Queue) GrabJobs(ctx context.Context, params GrabJobsParams) ([]*Job, error) {
 	executeAfter := time.Now().Unix()
 	if params.ExecuteAfter > 0 {
 		executeAfter = params.ExecuteAfter
@@ -100,11 +124,17 @@ func (q *Queries) GrabJobs(ctx context.Context, params GrabJobsParams) ([]*Job, 
 		limit = params.Count
 	}
 
-	return q.MarkJobsForConsumer(ctx, MarkJobsForConsumerParams{
-		Queue:        params.Queue,
-		ExecuteAfter: executeAfter,
-		Limit:        limit,
+	var jobs []*Job
+	err := q.write(func() (err error) {
+		jobs, err = q.MarkJobsForConsumer(ctx, MarkJobsForConsumerParams{
+			ConsumerID:   params.ConsumerID,
+			Queue:        params.Queue,
+			ExecuteAfter: executeAfter,
+			Limit:        limit,
+		})
+		return err
 	})
+	return jobs, err
 }
 
 type ConsumeParams struct {
@@ -113,51 +143,54 @@ type ConsumeParams struct {
 	Worker            func(context.Context, *Job) error
 	VisibilityTimeout int64
 	OnEmptySleep      time.Duration
+	PrefetchCount     int
 }
 
-func (q *Queries) Consume(ctx context.Context, params ConsumeParams) error {
-	workers := pond.New(params.PoolSize, params.PoolSize)
-	completed := make(chan completion, params.PoolSize)
-	flushed := make(chan struct{})
-	go func() {
-		// completions still in flight must be saved after ctx is canceled
-		q.completeInBatches(context.WithoutCancel(ctx), completed)
-		close(flushed)
-	}()
+func (q *Queue) Consume(ctx context.Context, params ConsumeParams) error {
+	prefetch := params.PrefetchCount
+	if prefetch == 0 {
+		prefetch = 4 * params.PoolSize
+	}
+	slots := newSlots(int64(params.PoolSize + prefetch))
+	workers := pond.New(params.PoolSize, int(slots.capacity))
+	consumerID := newConsumerID()
+	acks := q.newAcks(ctx, consumerID, params.PoolSize)
 	defer func() {
 		workers.StopAndWait()
-		close(completed)
-		<-flushed
+		acks.close()
 	}()
+	leases := q.newLeases(params.Queue, consumerID, params.VisibilityTimeout)
+	defer leases.stop()
 
 	sleep := params.OnEmptySleep
 	if sleep == 0 {
 		sleep = 1 * time.Second
 	}
-	// the timeout has a 1s resolution, checking more often than 1/10th of it gains nothing
-	resetEvery := time.Duration(params.VisibilityTimeout) * time.Second / 10
-	var lastReset time.Time
 	for {
 		// If the context gets canceled for example, stop consuming
 		if ctx.Err() != nil {
 			return nil
 		}
 
-		if params.VisibilityTimeout > 0 && time.Since(lastReset) >= resetEvery {
-			lastReset = time.Now()
-			_, err := q.ResetJobs(ctx, ResetJobsParams{
-				Queue:             params.Queue,
-				ConsumerFetchedAt: time.Now().Unix() - params.VisibilityTimeout,
-			})
+		if err := leases.maintain(ctx); err != nil {
+			return err
+		}
 
-			if err != nil {
-				return fmt.Errorf("error resetting jobs: %w", err)
+		// grab in large batches: wait until half the capacity is free
+		free := slots.free()
+		if free < (slots.capacity+1)/2 {
+			select {
+			case <-slots.released():
+			case <-leases.tick():
+			case <-ctx.Done():
 			}
+			continue
 		}
 
 		jobs, err := q.GrabJobs(ctx, GrabJobsParams{
-			Queue: params.Queue,
-			Count: int64(params.PoolSize),
+			Queue:      params.Queue,
+			ConsumerID: consumerID,
+			Count:      free,
 		})
 
 		if err != nil {
@@ -165,48 +198,254 @@ func (q *Queries) Consume(ctx context.Context, params ConsumeParams) error {
 		}
 
 		if len(jobs) == 0 {
-			time.Sleep(sleep)
+			select {
+			case <-time.After(sleep):
+			case <-leases.tick():
+			case <-ctx.Done():
+			}
 			continue
 		}
 
+		slots.take(len(jobs))
 		for _, job := range jobs {
 			job := job
+			leases.add(job)
 			workers.Submit(func() {
+				defer slots.release()
+				if !leases.start(job) {
+					// the lease was lost, the job is back on the queue for another consumer
+					return
+				}
 				err := params.Worker(ctx, job)
 				if err != nil {
-					q.FailJob(ctx, FailJobParams{
-						ID:     job.ID,
-						Errors: ErrorList(append(job.Errors, err.Error())),
+					q.write(func() error {
+						return q.FailJob(ctx, FailJobParams{
+							ID:         job.ID,
+							ConsumerID: consumerID,
+							Errors:     ErrorList(append(job.Errors, err.Error())),
+						})
 					})
 					return
 				}
 
-				done := make(chan error, 1)
-				completed <- completion{job.ID, done}
-				<-done
+				acks.send(job.ID)
 			})
 		}
 	}
 }
 
-type completion struct {
+// slots counts the jobs a consumer holds, running or prefetched.
+// release wakes the loop that waits for free slots. The signal holds no count:
+// one pending wake-up is enough, because the waiter reads free() again.
+type slots struct {
+	capacity int64
+	used     atomic.Int64
+	freed    chan struct{} // buffer 1, never blocks a worker
+}
+
+func newSlots(capacity int64) *slots {
+	return &slots{capacity: capacity, freed: make(chan struct{}, 1)}
+}
+
+func (s *slots) free() int64 { return s.capacity - s.used.Load() }
+func (s *slots) take(n int)  { s.used.Add(int64(n)) }
+
+func (s *slots) release() {
+	s.used.Add(-1) // before the signal, or the waiter can miss it
+	select {
+	case s.freed <- struct{}{}:
+	default:
+	}
+}
+
+// released fires after at least one release since the last receive.
+func (s *slots) released() <-chan struct{} { return s.freed }
+
+func newConsumerID() int64 {
+	b := make([]byte, 8)
+	rand.Read(b)
+	// 0 is the column default: never fetched
+	return int64(binary.BigEndian.Uint64(b)>>1) | 1
+}
+
+// leases keeps the visibility timeout correct. It renews the jobs fetched but
+// not started yet, so they are not reset while they wait in the prefetch
+// buffer, and it puts back the expired jobs of all consumers on the queue.
+type leases struct {
+	q          *Queue
+	queue      string
+	consumerID int64
+	timeout    int64
+	every      time.Duration
+	lastRun    time.Time
+	ticker     *time.Ticker
+	mu         sync.Mutex
+	waiting    map[int64]int64 // job id -> consumer_fetched_at
+}
+
+func (q *Queue) newLeases(queue string, consumerID int64, timeout int64) *leases {
+	l := &leases{q: q, queue: queue, consumerID: consumerID, timeout: timeout, waiting: map[int64]int64{}}
+	if timeout > 0 {
+		// the timeout has a 1s resolution, checking more often than 1/10th of it gains nothing
+		l.every = time.Duration(timeout) * time.Second / 10
+		l.ticker = time.NewTicker(l.every)
+	}
+	return l
+}
+
+func (l *leases) stop() {
+	if l.ticker != nil {
+		l.ticker.Stop()
+	}
+}
+
+// tick fires when maintain is due. Without a timeout it never fires.
+func (l *leases) tick() <-chan time.Time {
+	if l.ticker == nil {
+		return nil
+	}
+	return l.ticker.C
+}
+
+// maintain does nothing until it is due.
+func (l *leases) maintain(ctx context.Context) error {
+	if l.timeout == 0 || time.Since(l.lastRun) < l.every {
+		return nil
+	}
+	l.lastRun = time.Now()
+	if err := l.renew(ctx); err != nil {
+		return fmt.Errorf("error renewing jobs: %w", err)
+	}
+	err := l.q.write(func() error {
+		_, err := l.q.ResetJobs(ctx, ResetJobsParams{
+			Queue:             l.queue,
+			ConsumerFetchedAt: time.Now().Unix() - l.timeout,
+		})
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("error resetting jobs: %w", err)
+	}
+	return nil
+}
+
+func (l *leases) add(job *Job) {
+	if l.timeout == 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.waiting[job.ID] = job.ConsumerFetchedAt
+}
+
+// start reports whether the job still belongs to this consumer
+func (l *leases) start(job *Job) bool {
+	if l.timeout == 0 {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fetchedAt, ok := l.waiting[job.ID]
+	delete(l.waiting, job.ID)
+	if !ok || fetchedAt < time.Now().Unix()-l.timeout {
+		return false
+	}
+	job.ConsumerFetchedAt = fetchedAt
+	return true
+}
+
+func (l *leases) renew(ctx context.Context) error {
+	now := time.Now().Unix()
+	var ids []int64
+	l.mu.Lock()
+	for id, fetchedAt := range l.waiting {
+		if fetchedAt < now-l.timeout {
+			// already resettable: another consumer may hold it now
+			delete(l.waiting, id)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	l.mu.Unlock()
+	if len(ids) == 0 {
+		return nil
+	}
+
+	var renewed []int64
+	err := l.q.write(func() (err error) {
+		renewed, err = l.q.RenewJobs(ctx, RenewJobsParams{RenewedAt: now, ConsumerID: l.consumerID, Ids: ids})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
+	isRenewed := make(map[int64]bool, len(renewed))
+	for _, id := range renewed {
+		isRenewed[id] = true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, id := range ids {
+		if _, ok := l.waiting[id]; !ok {
+			// started during the renewal
+			continue
+		}
+		if isRenewed[id] {
+			l.waiting[id] = now
+		} else {
+			delete(l.waiting, id)
+		}
+	}
+	return nil
+}
+
+// acks groups completions. Each SQLite commit is costly and serialized, so the
+// workers that ack at the same time are written in one UPDATE. A worker is
+// released only once its job is committed. Under low load a batch is a single
+// id and no latency is added.
+type acks struct {
+	q          *Queue
+	consumerID int64
+	pending    chan ack
+	flushed    chan struct{}
+}
+
+type ack struct {
 	id   int64
 	done chan error
 }
 
-// Each SQLite commit is costly and serialized, so completions are grouped:
-// the workers waiting at the same time are written in one UPDATE. A worker is
-// released only once its job is committed. Under low load a batch is a single
-// id and no latency is added.
-func (q *Queries) completeInBatches(ctx context.Context, completions <-chan completion) {
-	var batch []completion
+func (q *Queue) newAcks(ctx context.Context, consumerID int64, buffer int) *acks {
+	a := &acks{q: q, consumerID: consumerID, pending: make(chan ack, buffer), flushed: make(chan struct{})}
+	// acks still in flight must be saved after ctx is canceled
+	go a.run(context.WithoutCancel(ctx))
+	return a
+}
+
+// send blocks until the job is committed.
+func (a *acks) send(id int64) error {
+	done := make(chan error, 1)
+	a.pending <- ack{id, done}
+	return <-done
+}
+
+// close waits for the pending acks. Call it once no worker can send.
+func (a *acks) close() {
+	close(a.pending)
+	<-a.flushed
+}
+
+func (a *acks) run(ctx context.Context) {
+	defer close(a.flushed)
+	var batch []ack
 	var ids []int64
-	for c := range completions {
+	for c := range a.pending {
 		batch = append(batch[:0], c)
 	drain:
 		for {
 			select {
-			case c, ok := <-completions:
+			case c, ok := <-a.pending:
 				if !ok {
 					break drain
 				}
@@ -220,7 +459,9 @@ func (q *Queries) completeInBatches(ctx context.Context, completions <-chan comp
 			ids = append(ids, c.id)
 		}
 		// on error, the visibility timeout puts the jobs back, as with CompleteJob before
-		err := q.CompleteJobs(ctx, ids)
+		err := a.q.write(func() error {
+			return a.q.CompleteJobs(ctx, CompleteJobsParams{ConsumerID: a.consumerID, Ids: ids})
+		})
 		for _, c := range batch {
 			c.done <- err
 		}

@@ -58,12 +58,16 @@ func getDb(file string) (*sql.DB, error) {
 	return db, nil
 }
 
-func getJqueue(file string) (*internal.Queries, error) {
+func getJqueue(file string) (*internal.Queue, error) {
 	sqlcdb, err := getDb(file)
 	if err != nil {
 		return nil, err
 	}
-	return internal.New(sqlcdb), nil
+	queries, err := internal.Prepare(context.Background(), sqlcdb)
+	if err != nil {
+		return nil, err
+	}
+	return internal.NewQueue(queries), nil
 }
 
 func Test_QueueJob(t *testing.T) {
@@ -71,7 +75,7 @@ func Test_QueueJob(t *testing.T) {
 	sqlcdb, err := getDb("jobs.db")
 	is.NoErr(err) // error opening sqlite3 database
 
-	jqueue := internal.New(sqlcdb)
+	jqueue := internal.NewQueue(internal.New(sqlcdb))
 	jobPaylod := `{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue: "",
@@ -93,7 +97,7 @@ func Test_FetchTwice(t *testing.T) {
 	sqlcdb, err := getDb("jobs.db")
 	is.NoErr(err) // error opening sqlite3 database
 
-	jqueue := internal.New(sqlcdb)
+	jqueue := internal.NewQueue(internal.New(sqlcdb))
 	jobPaylod := `{"type": "slack", "channel": "C01B2PZQZ3D", "text": "Hello world"}`
 	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
 		Queue: "",
@@ -381,6 +385,114 @@ func Test_VisibilityTimeout(t *testing.T) {
 	is.Equal(job.Errors, internal.ErrorList{"visibility timeout expired"})
 	// Sleep to ensure enough time for the job to finish and avoid panics
 	time.Sleep(2 * time.Second)
+}
+
+// Prefetched jobs that wait longer than the visibility timeout keep their lease:
+// each one runs once and completes, none is reset while it waits.
+func Test_PrefetchKeepsLease(t *testing.T) {
+	is := is.New(t)
+	jqueue, err := getJqueue("jobs.db")
+	is.NoErr(err) // error getting job queue
+
+	for i := 0; i < 5; i++ {
+		err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+			Queue: "",
+			Job:   fmt.Sprintf("job:%d", i),
+		})
+		is.NoErr(err) // error queuing job
+	}
+
+	// with a single worker, the last job waits 3.2s: longer than the timeout
+	ran := make(chan int64, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	consumed := make(chan struct{})
+	go func() {
+		jqueue.Consume(ctx, internal.ConsumeParams{
+			Queue:             "",
+			PoolSize:          1,
+			PrefetchCount:     4,
+			VisibilityTimeout: 2,
+			OnEmptySleep:      100 * time.Millisecond,
+			Worker: func(ctx context.Context, job *internal.Job) error {
+				ran <- job.ID
+				time.Sleep(800 * time.Millisecond)
+				return nil
+			},
+		})
+		close(consumed)
+	}()
+
+	runs := map[int64]int{}
+	for len(runs) < 5 {
+		select {
+		case id := <-ran:
+			runs[id]++
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of 5 jobs ran", len(runs))
+		}
+	}
+	cancel()
+	<-consumed
+	close(ran)
+	for id := range ran {
+		runs[id]++
+	}
+
+	for id, n := range runs {
+		is.Equal(n, 1) // expected each job to run once
+		job, err := jqueue.FindJob(context.Background(), id)
+		is.NoErr(err)                        // error finding job
+		is.Equal(job.JobStatus, "completed") // expected job completed
+		is.Equal(len(job.Errors), 0)         // expected no visibility timeout error
+	}
+}
+
+// A consumer that lost its lease (the job was reset and fetched by another
+// consumer) can no longer complete or fail the job.
+func Test_StaleConsumerCannotFinishJob(t *testing.T) {
+	is := is.New(t)
+	jqueue, err := getJqueue("jobs.db")
+	is.NoErr(err) // error getting job queue
+
+	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+		Queue:             "",
+		Job:               `job:1`,
+		RemainingAttempts: 3,
+	})
+	is.NoErr(err) // error queuing job
+
+	jobs, err := jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{Queue: "", ConsumerID: 1})
+	is.NoErr(err)          // error grabbing for a
+	is.Equal(len(jobs), 1) // expected a to get the job
+	id := jobs[0].ID
+
+	_, err = jqueue.ResetJobs(context.Background(), internal.ResetJobsParams{
+		Queue:             "",
+		ConsumerFetchedAt: time.Now().Unix() + 100,
+	})
+	is.NoErr(err) // error resetting job
+
+	jobs, err = jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{Queue: "", ConsumerID: 2})
+	is.NoErr(err)          // error grabbing for b
+	is.Equal(len(jobs), 1) // expected b to get the job
+
+	err = jqueue.CompleteJobs(context.Background(), internal.CompleteJobsParams{ConsumerID: 1, Ids: []int64{id}})
+	is.NoErr(err) // error completing for a
+	err = jqueue.FailJob(context.Background(), internal.FailJobParams{ID: id, ConsumerID: 1, Errors: internal.ErrorList{"late"}})
+	is.NoErr(err) // error failing for a
+
+	job, err := jqueue.FindJob(context.Background(), id)
+	is.NoErr(err)                             // error finding job
+	is.Equal(job.JobStatus, "fetched")        // a must not change b's job
+	is.Equal(job.ConsumerID, int64(2))        // still held by b
+	is.Equal(job.RemainingAttempts, int64(2)) // only the reset used an attempt
+	is.Equal(job.Errors, internal.ErrorList{"visibility timeout expired"})
+
+	err = jqueue.CompleteJobs(context.Background(), internal.CompleteJobsParams{ConsumerID: 2, Ids: []int64{id}})
+	is.NoErr(err) // error completing for b
+	job, err = jqueue.FindJob(context.Background(), id)
+	is.NoErr(err)                        // error finding job
+	is.Equal(job.JobStatus, "completed") // b completes its job
 }
 
 func Test_DedupeIgnore(t *testing.T) {

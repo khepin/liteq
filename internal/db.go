@@ -7,6 +7,7 @@ package internal
 import (
 	"context"
 	"database/sql"
+	"fmt"
 )
 
 type DBTX interface {
@@ -20,12 +21,148 @@ func New(db DBTX) *Queries {
 	return &Queries{db: db}
 }
 
+func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
+	q := Queries{db: db}
+	var err error
+	if q.completeJobStmt, err = db.PrepareContext(ctx, completeJob); err != nil {
+		return nil, fmt.Errorf("error preparing query CompleteJob: %w", err)
+	}
+	if q.completeJobsStmt, err = db.PrepareContext(ctx, completeJobs); err != nil {
+		return nil, fmt.Errorf("error preparing query CompleteJobs: %w", err)
+	}
+	if q.failJobStmt, err = db.PrepareContext(ctx, failJob); err != nil {
+		return nil, fmt.Errorf("error preparing query FailJob: %w", err)
+	}
+	if q.findJobStmt, err = db.PrepareContext(ctx, findJob); err != nil {
+		return nil, fmt.Errorf("error preparing query FindJob: %w", err)
+	}
+	if q.markJobsForConsumerStmt, err = db.PrepareContext(ctx, markJobsForConsumer); err != nil {
+		return nil, fmt.Errorf("error preparing query MarkJobsForConsumer: %w", err)
+	}
+	if q.renewJobsStmt, err = db.PrepareContext(ctx, renewJobs); err != nil {
+		return nil, fmt.Errorf("error preparing query RenewJobs: %w", err)
+	}
+	if q.resetJobsStmt, err = db.PrepareContext(ctx, resetJobs); err != nil {
+		return nil, fmt.Errorf("error preparing query ResetJobs: %w", err)
+	}
+	if q.doQueueJobIgnoreDupeStmt, err = db.PrepareContext(ctx, doQueueJobIgnoreDupe); err != nil {
+		return nil, fmt.Errorf("error preparing query doQueueJobIgnoreDupe: %w", err)
+	}
+	if q.doQueueJobReplaceDupeStmt, err = db.PrepareContext(ctx, doQueueJobReplaceDupe); err != nil {
+		return nil, fmt.Errorf("error preparing query doQueueJobReplaceDupe: %w", err)
+	}
+	return &q, nil
+}
+
+func (q *Queries) Close() error {
+	var err error
+	if q.completeJobStmt != nil {
+		if cerr := q.completeJobStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing completeJobStmt: %w", cerr)
+		}
+	}
+	if q.completeJobsStmt != nil {
+		if cerr := q.completeJobsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing completeJobsStmt: %w", cerr)
+		}
+	}
+	if q.failJobStmt != nil {
+		if cerr := q.failJobStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing failJobStmt: %w", cerr)
+		}
+	}
+	if q.findJobStmt != nil {
+		if cerr := q.findJobStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing findJobStmt: %w", cerr)
+		}
+	}
+	if q.markJobsForConsumerStmt != nil {
+		if cerr := q.markJobsForConsumerStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing markJobsForConsumerStmt: %w", cerr)
+		}
+	}
+	if q.renewJobsStmt != nil {
+		if cerr := q.renewJobsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing renewJobsStmt: %w", cerr)
+		}
+	}
+	if q.resetJobsStmt != nil {
+		if cerr := q.resetJobsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing resetJobsStmt: %w", cerr)
+		}
+	}
+	if q.doQueueJobIgnoreDupeStmt != nil {
+		if cerr := q.doQueueJobIgnoreDupeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing doQueueJobIgnoreDupeStmt: %w", cerr)
+		}
+	}
+	if q.doQueueJobReplaceDupeStmt != nil {
+		if cerr := q.doQueueJobReplaceDupeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing doQueueJobReplaceDupeStmt: %w", cerr)
+		}
+	}
+	return err
+}
+
+func (q *Queries) exec(ctx context.Context, stmt *sql.Stmt, query string, args ...interface{}) (sql.Result, error) {
+	switch {
+	case stmt != nil && q.tx != nil:
+		return q.tx.StmtContext(ctx, stmt).ExecContext(ctx, args...)
+	case stmt != nil:
+		return stmt.ExecContext(ctx, args...)
+	default:
+		return q.db.ExecContext(ctx, query, args...)
+	}
+}
+
+func (q *Queries) query(ctx context.Context, stmt *sql.Stmt, query string, args ...interface{}) (*sql.Rows, error) {
+	switch {
+	case stmt != nil && q.tx != nil:
+		return q.tx.StmtContext(ctx, stmt).QueryContext(ctx, args...)
+	case stmt != nil:
+		return stmt.QueryContext(ctx, args...)
+	default:
+		return q.db.QueryContext(ctx, query, args...)
+	}
+}
+
+func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, args ...interface{}) *sql.Row {
+	switch {
+	case stmt != nil && q.tx != nil:
+		return q.tx.StmtContext(ctx, stmt).QueryRowContext(ctx, args...)
+	case stmt != nil:
+		return stmt.QueryRowContext(ctx, args...)
+	default:
+		return q.db.QueryRowContext(ctx, query, args...)
+	}
+}
+
 type Queries struct {
-	db DBTX
+	db                        DBTX
+	tx                        *sql.Tx
+	completeJobStmt           *sql.Stmt
+	completeJobsStmt          *sql.Stmt
+	failJobStmt               *sql.Stmt
+	findJobStmt               *sql.Stmt
+	markJobsForConsumerStmt   *sql.Stmt
+	renewJobsStmt             *sql.Stmt
+	resetJobsStmt             *sql.Stmt
+	doQueueJobIgnoreDupeStmt  *sql.Stmt
+	doQueueJobReplaceDupeStmt *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
-		db: tx,
+		db:                        tx,
+		tx:                        tx,
+		completeJobStmt:           q.completeJobStmt,
+		completeJobsStmt:          q.completeJobsStmt,
+		failJobStmt:               q.failJobStmt,
+		findJobStmt:               q.findJobStmt,
+		markJobsForConsumerStmt:   q.markJobsForConsumerStmt,
+		renewJobsStmt:             q.renewJobsStmt,
+		resetJobsStmt:             q.resetJobsStmt,
+		doQueueJobIgnoreDupeStmt:  q.doQueueJobIgnoreDupeStmt,
+		doQueueJobReplaceDupeStmt: q.doQueueJobReplaceDupeStmt,
 	}
 }

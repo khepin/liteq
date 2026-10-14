@@ -24,7 +24,7 @@ WHERE
 `
 
 func (q *Queries) CompleteJob(ctx context.Context, id int64) error {
-	_, err := q.db.ExecContext(ctx, completeJob, id)
+	_, err := q.exec(ctx, q.completeJobStmt, completeJob, id)
 	return err
 }
 
@@ -38,21 +38,29 @@ SET
     consumer_fetched_at = 0,
     remaining_attempts = 0
 WHERE
-    id IN (/*SLICE:ids*/?)
+    jobs.job_status = 'fetched'
+    AND jobs.consumer_id = ?1
+    AND jobs.id IN (/*SLICE:ids*/?)
 `
 
-func (q *Queries) CompleteJobs(ctx context.Context, ids []int64) error {
+type CompleteJobsParams struct {
+	ConsumerID int64
+	Ids        []int64
+}
+
+func (q *Queries) CompleteJobs(ctx context.Context, arg CompleteJobsParams) error {
 	query := completeJobs
 	var queryParams []interface{}
-	if len(ids) > 0 {
-		for _, v := range ids {
+	queryParams = append(queryParams, arg.ConsumerID)
+	if len(arg.Ids) > 0 {
+		for _, v := range arg.Ids {
 			queryParams = append(queryParams, v)
 		}
-		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(arg.Ids))[1:], 1)
 	} else {
 		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
 	}
-	_, err := q.db.ExecContext(ctx, query, queryParams...)
+	_, err := q.exec(ctx, nil, query, queryParams...)
 	return err
 }
 
@@ -82,21 +90,24 @@ SET
     errors = ?
 WHERE
     jobs.id = ?
+    AND jobs.job_status = 'fetched'
+    AND jobs.consumer_id = ?
 `
 
 type FailJobParams struct {
-	Errors ErrorList
-	ID     int64
+	Errors     ErrorList
+	ID         int64
+	ConsumerID int64
 }
 
 func (q *Queries) FailJob(ctx context.Context, arg FailJobParams) error {
-	_, err := q.db.ExecContext(ctx, failJob, arg.Errors, arg.ID)
+	_, err := q.exec(ctx, q.failJobStmt, failJob, arg.Errors, arg.ID, arg.ConsumerID)
 	return err
 }
 
 const findJob = `-- name: FindJob :one
 SELECT
-    id, queue, job, job_status, execute_after, remaining_attempts, consumer_fetched_at, finished_at, deduping_key, errors, created_at, updated_at
+    id, queue, job, job_status, execute_after, remaining_attempts, consumer_fetched_at, consumer_id, finished_at, deduping_key, errors, created_at, updated_at
 FROM
     jobs
 WHERE
@@ -104,7 +115,7 @@ WHERE
 `
 
 func (q *Queries) FindJob(ctx context.Context, id int64) (*Job, error) {
-	row := q.db.QueryRowContext(ctx, findJob, id)
+	row := q.queryRow(ctx, q.findJobStmt, findJob, id)
 	var i Job
 	err := row.Scan(
 		&i.ID,
@@ -114,6 +125,7 @@ func (q *Queries) FindJob(ctx context.Context, id int64) (*Job, error) {
 		&i.ExecuteAfter,
 		&i.RemainingAttempts,
 		&i.ConsumerFetchedAt,
+		&i.ConsumerID,
 		&i.FinishedAt,
 		&i.DedupingKey,
 		&i.Errors,
@@ -127,6 +139,7 @@ const markJobsForConsumer = `-- name: MarkJobsForConsumer :many
 UPDATE
     jobs
 SET
+    consumer_id = ?,
     consumer_fetched_at = unixepoch(),
     updated_at = unixepoch(),
     job_status = 'fetched'
@@ -157,17 +170,23 @@ WHERE
             execute_after ASC
         LIMIT
             ?
-    ) RETURNING id, queue, job, job_status, execute_after, remaining_attempts, consumer_fetched_at, finished_at, deduping_key, errors, created_at, updated_at
+    ) RETURNING id, queue, job, job_status, execute_after, remaining_attempts, consumer_fetched_at, consumer_id, finished_at, deduping_key, errors, created_at, updated_at
 `
 
 type MarkJobsForConsumerParams struct {
+	ConsumerID   int64
 	Queue        string
 	ExecuteAfter int64
 	Limit        int64
 }
 
 func (q *Queries) MarkJobsForConsumer(ctx context.Context, arg MarkJobsForConsumerParams) ([]*Job, error) {
-	rows, err := q.db.QueryContext(ctx, markJobsForConsumer, arg.Queue, arg.ExecuteAfter, arg.Limit)
+	rows, err := q.query(ctx, q.markJobsForConsumerStmt, markJobsForConsumer,
+		arg.ConsumerID,
+		arg.Queue,
+		arg.ExecuteAfter,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -183,6 +202,7 @@ func (q *Queries) MarkJobsForConsumer(ctx context.Context, arg MarkJobsForConsum
 			&i.ExecuteAfter,
 			&i.RemainingAttempts,
 			&i.ConsumerFetchedAt,
+			&i.ConsumerID,
 			&i.FinishedAt,
 			&i.DedupingKey,
 			&i.Errors,
@@ -192,6 +212,59 @@ func (q *Queries) MarkJobsForConsumer(ctx context.Context, arg MarkJobsForConsum
 			return nil, err
 		}
 		items = append(items, &i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const renewJobs = `-- name: RenewJobs :many
+UPDATE
+    jobs
+SET
+    consumer_fetched_at = ?1,
+    updated_at = unixepoch()
+WHERE
+    jobs.job_status = 'fetched'
+    AND jobs.consumer_id = ?2
+    AND jobs.id IN (/*SLICE:ids*/?) RETURNING id
+`
+
+type RenewJobsParams struct {
+	RenewedAt  int64
+	ConsumerID int64
+	Ids        []int64
+}
+
+func (q *Queries) RenewJobs(ctx context.Context, arg RenewJobsParams) ([]int64, error) {
+	query := renewJobs
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.RenewedAt)
+	queryParams = append(queryParams, arg.ConsumerID)
+	if len(arg.Ids) > 0 {
+		for _, v := range arg.Ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(arg.Ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.query(ctx, nil, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -237,7 +310,7 @@ type ResetJobsParams struct {
 }
 
 func (q *Queries) ResetJobs(ctx context.Context, arg ResetJobsParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, resetJobs, arg.Queue, arg.ConsumerFetchedAt)
+	result, err := q.exec(ctx, q.resetJobsStmt, resetJobs, arg.Queue, arg.ConsumerFetchedAt)
 	if err != nil {
 		return 0, err
 	}
@@ -281,7 +354,7 @@ type doQueueJobIgnoreDupeParams struct {
 }
 
 func (q *Queries) doQueueJobIgnoreDupe(ctx context.Context, arg doQueueJobIgnoreDupeParams) error {
-	_, err := q.db.ExecContext(ctx, doQueueJobIgnoreDupe,
+	_, err := q.exec(ctx, q.doQueueJobIgnoreDupeStmt, doQueueJobIgnoreDupe,
 		arg.Queue,
 		arg.Job,
 		arg.ExecuteAfter,
@@ -334,7 +407,7 @@ type doQueueJobReplaceDupeParams struct {
 }
 
 func (q *Queries) doQueueJobReplaceDupe(ctx context.Context, arg doQueueJobReplaceDupeParams) error {
-	_, err := q.db.ExecContext(ctx, doQueueJobReplaceDupe,
+	_, err := q.exec(ctx, q.doQueueJobReplaceDupeStmt, doQueueJobReplaceDupe,
 		arg.Queue,
 		arg.Job,
 		arg.ExecuteAfter,
