@@ -219,7 +219,7 @@ func (q *Queue) Consume(ctx context.Context, params ConsumeParams) error {
 				err := params.Worker(ctx, job)
 				if err != nil {
 					q.write(func() error {
-						return q.FailJob(ctx, FailJobParams{
+						return q.FailJob(context.WithoutCancel(ctx), FailJobParams{
 							ID:         job.ID,
 							ConsumerID: consumerID,
 							Errors:     ErrorList(append(job.Errors, err.Error())),

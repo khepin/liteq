@@ -788,3 +788,35 @@ func Test_DedupeReplace(t *testing.T) {
 	is.Equal(len(jobs), 1)         // expected only 1 job due to dedupe
 	is.Equal(jobs[0].Job, `job:2`) // expected job:1
 }
+
+// A failure returned after ctx is canceled is still recorded.
+func Test_FailJobAfterCancel(t *testing.T) {
+	is := is.New(t)
+	jqueue, err := getJqueue("jobs.db")
+	is.NoErr(err) // error getting job queue
+
+	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+		Queue:             "",
+		Job:               `job:1`,
+		RemainingAttempts: 2,
+	})
+	is.NoErr(err) // error queuing job
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var id int64
+	jqueue.Consume(ctx, internal.ConsumeParams{
+		Queue:    "",
+		PoolSize: 1,
+		Worker: func(ctx context.Context, job *internal.Job) error {
+			id = job.ID
+			cancel()
+			return ctx.Err()
+		},
+	})
+
+	job, err := jqueue.FindJob(context.Background(), id)
+	is.NoErr(err)                                                // error finding job
+	is.Equal(job.JobStatus, "queued")                            // expected job back on the queue
+	is.Equal(job.RemainingAttempts, int64(1))                    // expected one attempt used
+	is.Equal(job.Errors, internal.ErrorList{"context canceled"}) // expected the worker error
+}
