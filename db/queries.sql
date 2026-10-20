@@ -196,3 +196,15 @@ FROM
     jobs
 WHERE
     id = ?;
+
+-- name: ReleaseJobs :exec
+UPDATE
+    jobs
+SET
+    job_status = 'queued',
+    consumer_fetched_at = 0,
+    updated_at = unixepoch()
+WHERE
+    jobs.job_status = 'fetched'
+    AND jobs.consumer_id = sqlc.arg('consumer_id')
+    AND jobs.id IN (sqlc.slice('ids'));

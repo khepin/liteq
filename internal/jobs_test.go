@@ -820,3 +820,41 @@ func Test_FailJobAfterCancel(t *testing.T) {
 	is.Equal(job.RemainingAttempts, int64(1))                    // expected one attempt used
 	is.Equal(job.Errors, internal.ErrorList{"context canceled"}) // expected the worker error
 }
+
+// On shutdown, prefetched jobs that have not started go back on the queue
+// without running and without using an attempt.
+func Test_ShutdownReleasesPrefetchedJobs(t *testing.T) {
+	is := is.New(t)
+	jqueue, err := getJqueue("jobs.db")
+	is.NoErr(err) // error getting job queue
+
+	for i := 0; i < 5; i++ {
+		err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+			Queue: "",
+			Job:   fmt.Sprintf("job:%d", i),
+		})
+		is.NoErr(err) // error queuing job
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runs := 0
+	jqueue.Consume(ctx, internal.ConsumeParams{
+		Queue:         "",
+		PoolSize:      1,
+		PrefetchCount: 4,
+		Worker: func(ctx context.Context, job *internal.Job) error {
+			runs++
+			cancel()
+			return nil
+		},
+	})
+	is.Equal(runs, 1) // expected only the first job to run
+
+	jobs, err := jqueue.GrabJobs(context.Background(), internal.GrabJobsParams{Queue: "", Count: 10})
+	is.NoErr(err)          // error grabbing jobs
+	is.Equal(len(jobs), 4) // expected the 4 prefetched jobs back on the queue
+	for _, job := range jobs {
+		is.Equal(job.RemainingAttempts, int64(1)) // expected no attempt used
+		is.Equal(len(job.Errors), 0)              // expected no error
+	}
+}

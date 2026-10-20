@@ -155,12 +155,13 @@ func (q *Queue) Consume(ctx context.Context, params ConsumeParams) error {
 	workers := pond.New(params.PoolSize, int(slots.capacity))
 	consumerID := newConsumerID()
 	acks := q.newAcks(ctx, consumerID, params.PoolSize)
+	leases := q.newLeases(params.Queue, consumerID, params.VisibilityTimeout)
 	defer func() {
 		workers.StopAndWait()
+		leases.release(context.WithoutCancel(ctx))
 		acks.close()
+		leases.stop()
 	}()
-	leases := q.newLeases(params.Queue, consumerID, params.VisibilityTimeout)
-	defer leases.stop()
 
 	sleep := params.OnEmptySleep
 	if sleep == 0 {
@@ -212,8 +213,7 @@ func (q *Queue) Consume(ctx context.Context, params ConsumeParams) error {
 			leases.add(job)
 			workers.Submit(func() {
 				defer slots.release()
-				if !leases.start(job) {
-					// the lease was lost, the job is back on the queue for another consumer
+				if !leases.start(ctx, job) {
 					return
 				}
 				err := params.Worker(ctx, job)
@@ -281,6 +281,7 @@ type leases struct {
 	ticker     *time.Ticker
 	mu         sync.Mutex
 	waiting    map[int64]int64 // job id -> consumer_fetched_at
+	unstarted  []int64
 }
 
 func (q *Queue) newLeases(queue string, consumerID int64, timeout int64) *leases {
@@ -307,8 +308,12 @@ func (l *leases) tick() <-chan time.Time {
 	return l.ticker.C
 }
 
-// maintain does nothing until it is due.
+// maintain releases the unstarted jobs at once. Renewal and reset run only
+// when they are due.
 func (l *leases) maintain(ctx context.Context) error {
+	if err := l.release(ctx); err != nil {
+		return fmt.Errorf("error releasing jobs: %w", err)
+	}
 	if l.timeout == 0 || time.Since(l.lastRun) < l.every {
 		return nil
 	}
@@ -338,20 +343,37 @@ func (l *leases) add(job *Job) {
 	l.waiting[job.ID] = job.ConsumerFetchedAt
 }
 
-// start reports whether the job still belongs to this consumer
-func (l *leases) start(job *Job) bool {
-	if l.timeout == 0 {
-		return true
-	}
+// start reports whether the job can run: ctx is not canceled and the job
+// still belongs to this consumer. A job that cannot run is kept for release.
+func (l *leases) start(ctx context.Context, job *Job) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	fetchedAt, ok := l.waiting[job.ID]
 	delete(l.waiting, job.ID)
-	if !ok || fetchedAt < time.Now().Unix()-l.timeout {
+	expired := l.timeout > 0 && (!ok || fetchedAt < time.Now().Unix()-l.timeout)
+	if ctx.Err() != nil || expired {
+		l.unstarted = append(l.unstarted, job.ID)
 		return false
 	}
-	job.ConsumerFetchedAt = fetchedAt
+	if l.timeout > 0 {
+		job.ConsumerFetchedAt = fetchedAt
+	}
 	return true
+}
+
+// release puts the unstarted jobs back on the queue without using an attempt.
+// A job that is no longer fetched by this consumer is not changed.
+func (l *leases) release(ctx context.Context) error {
+	l.mu.Lock()
+	ids := l.unstarted
+	l.unstarted = nil
+	l.mu.Unlock()
+	if len(ids) == 0 {
+		return nil
+	}
+	return l.q.write(func() error {
+		return l.q.ReleaseJobs(ctx, ReleaseJobsParams{ConsumerID: l.consumerID, Ids: ids})
+	})
 }
 
 func (l *leases) renew(ctx context.Context) error {

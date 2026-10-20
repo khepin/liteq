@@ -222,6 +222,40 @@ func (q *Queries) MarkJobsForConsumer(ctx context.Context, arg MarkJobsForConsum
 	return items, nil
 }
 
+const releaseJobs = `-- name: ReleaseJobs :exec
+UPDATE
+    jobs
+SET
+    job_status = 'queued',
+    consumer_fetched_at = 0,
+    updated_at = unixepoch()
+WHERE
+    jobs.job_status = 'fetched'
+    AND jobs.consumer_id = ?1
+    AND jobs.id IN (/*SLICE:ids*/?)
+`
+
+type ReleaseJobsParams struct {
+	ConsumerID int64
+	Ids        []int64
+}
+
+func (q *Queries) ReleaseJobs(ctx context.Context, arg ReleaseJobsParams) error {
+	query := releaseJobs
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.ConsumerID)
+	if len(arg.Ids) > 0 {
+		for _, v := range arg.Ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(arg.Ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	_, err := q.exec(ctx, nil, query, queryParams...)
+	return err
+}
+
 const renewJobs = `-- name: RenewJobs :many
 UPDATE
     jobs

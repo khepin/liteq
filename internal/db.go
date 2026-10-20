@@ -39,6 +39,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.markJobsForConsumerStmt, err = db.PrepareContext(ctx, markJobsForConsumer); err != nil {
 		return nil, fmt.Errorf("error preparing query MarkJobsForConsumer: %w", err)
 	}
+	if q.releaseJobsStmt, err = db.PrepareContext(ctx, releaseJobs); err != nil {
+		return nil, fmt.Errorf("error preparing query ReleaseJobs: %w", err)
+	}
 	if q.renewJobsStmt, err = db.PrepareContext(ctx, renewJobs); err != nil {
 		return nil, fmt.Errorf("error preparing query RenewJobs: %w", err)
 	}
@@ -79,6 +82,11 @@ func (q *Queries) Close() error {
 	if q.markJobsForConsumerStmt != nil {
 		if cerr := q.markJobsForConsumerStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing markJobsForConsumerStmt: %w", cerr)
+		}
+	}
+	if q.releaseJobsStmt != nil {
+		if cerr := q.releaseJobsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing releaseJobsStmt: %w", cerr)
 		}
 	}
 	if q.renewJobsStmt != nil {
@@ -145,6 +153,7 @@ type Queries struct {
 	failJobStmt               *sql.Stmt
 	findJobStmt               *sql.Stmt
 	markJobsForConsumerStmt   *sql.Stmt
+	releaseJobsStmt           *sql.Stmt
 	renewJobsStmt             *sql.Stmt
 	resetJobsStmt             *sql.Stmt
 	doQueueJobIgnoreDupeStmt  *sql.Stmt
@@ -160,6 +169,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		failJobStmt:               q.failJobStmt,
 		findJobStmt:               q.findJobStmt,
 		markJobsForConsumerStmt:   q.markJobsForConsumerStmt,
+		releaseJobsStmt:           q.releaseJobsStmt,
 		renewJobsStmt:             q.renewJobsStmt,
 		resetJobsStmt:             q.resetJobsStmt,
 		doQueueJobIgnoreDupeStmt:  q.doQueueJobIgnoreDupeStmt,
