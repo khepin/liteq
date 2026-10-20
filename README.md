@@ -79,7 +79,7 @@ jqueue.Consume(context.Background(), liteq.ConsumeParams{
 - `context.Background()` You can pass in a cancellable context and the queue will stop processing when the context is canceled
 - `Queue` this is the name of the queue we want this consumer to consume from
 - `PoolSize` this is the number of concurrent consumer we want for this queue
-- `PrefetchCount` the number of jobs fetched ahead of the free workers, defaults to `4 * PoolSize`. Each fetch is a write, so a larger value gives more throughput for short jobs. The visibility timeout of a prefetched job is renewed until a worker starts it, so the timeout only counts the time the job runs.
+- `PrefetchCount` the number of jobs fetched ahead of the free workers, defaults to `4 * PoolSize`. Each fetch is a write, so a larger value gives more throughput for short jobs. The visibility timeout of a prefetched job is renewed while it waits for a worker, so it gets at least 90% of the timeout to run.
 - `VisibilityTimeout` is the time that a job will remain reserved to a consumer. After that time has elapsed, if the job hasn't been marked either failed
 or successful, it will be put back in the queue for others to consume. The error will be added to the job's error list and the number of remaining attempts will be
 decreased.
