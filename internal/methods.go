@@ -153,9 +153,8 @@ func (q *Queue) Consume(ctx context.Context, params ConsumeParams) error {
 	}
 	slots := newSlots(int64(params.PoolSize + prefetch))
 	workers := pond.New(params.PoolSize, int(slots.capacity))
-	consumerID := newConsumerID()
-	acks := q.newAcks(ctx, consumerID, params.PoolSize)
-	leases := q.newLeases(params.Queue, consumerID, params.VisibilityTimeout)
+	acks := q.newAcks(ctx, params.PoolSize)
+	leases := q.newLeases(params.Queue, params.VisibilityTimeout)
 	defer func() {
 		workers.StopAndWait()
 		leases.release(context.WithoutCancel(ctx))
@@ -190,7 +189,7 @@ func (q *Queue) Consume(ctx context.Context, params ConsumeParams) error {
 
 		jobs, err := q.GrabJobs(ctx, GrabJobsParams{
 			Queue:      params.Queue,
-			ConsumerID: consumerID,
+			ConsumerID: leases.consumerID,
 			Count:      free,
 		})
 
@@ -221,14 +220,14 @@ func (q *Queue) Consume(ctx context.Context, params ConsumeParams) error {
 					q.write(func() error {
 						return q.FailJob(context.WithoutCancel(ctx), FailJobParams{
 							ID:         job.ID,
-							ConsumerID: consumerID,
+							ConsumerID: job.ConsumerID,
 							Errors:     ErrorList(append(job.Errors, err.Error())),
 						})
 					})
 					return
 				}
 
-				acks.send(job.ID)
+				acks.send(job)
 			})
 		}
 	}
@@ -272,20 +271,27 @@ func newConsumerID() int64 {
 // not started yet, so they are not reset while they wait in the prefetch
 // buffer, and it puts back the expired jobs of all consumers on the queue.
 type leases struct {
-	q          *Queue
-	queue      string
+	q       *Queue
+	queue   string
+	timeout int64
+	every   time.Duration
+	lastRun time.Time
+	ticker  *time.Ticker
+	// A reset needs the timeout to pass, and the id changes more often than
+	// that: a stale run never shares its id with a new grab of the same job.
 	consumerID int64
-	timeout    int64
-	every      time.Duration
-	lastRun    time.Time
-	ticker     *time.Ticker
 	mu         sync.Mutex
-	waiting    map[int64]int64 // job id -> consumer_fetched_at
-	unstarted  []int64
+	waiting    map[int64]lease   // job id -> lease
+	unstarted  map[int64][]int64 // consumer id -> job ids
 }
 
-func (q *Queue) newLeases(queue string, consumerID int64, timeout int64) *leases {
-	l := &leases{q: q, queue: queue, consumerID: consumerID, timeout: timeout, waiting: map[int64]int64{}}
+type lease struct {
+	consumerID int64
+	fetchedAt  int64
+}
+
+func (q *Queue) newLeases(queue string, timeout int64) *leases {
+	l := &leases{q: q, queue: queue, timeout: timeout, consumerID: newConsumerID(), waiting: map[int64]lease{}, unstarted: map[int64][]int64{}}
 	if timeout > 0 {
 		// the timeout has a 1s resolution, checking more often than 1/10th of it gains nothing
 		l.every = time.Duration(timeout) * time.Second / 10
@@ -318,6 +324,7 @@ func (l *leases) maintain(ctx context.Context) error {
 		return nil
 	}
 	l.lastRun = time.Now()
+	l.consumerID = newConsumerID()
 	if err := l.renew(ctx); err != nil {
 		return fmt.Errorf("error renewing jobs: %w", err)
 	}
@@ -340,84 +347,89 @@ func (l *leases) add(job *Job) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.waiting[job.ID] = job.ConsumerFetchedAt
+	l.waiting[job.ID] = lease{job.ConsumerID, job.ConsumerFetchedAt}
 }
 
-// start reports whether the job can run: ctx is not canceled and the job
-// still belongs to this consumer. A job that cannot run is kept for release.
+// start reports whether the job can run: ctx is not canceled and this grab
+// still holds the job. A job that cannot run is kept for release.
 func (l *leases) start(ctx context.Context, job *Job) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	fetchedAt, ok := l.waiting[job.ID]
-	delete(l.waiting, job.ID)
-	expired := l.timeout > 0 && (!ok || fetchedAt < time.Now().Unix()-l.timeout)
+	w, ok := l.waiting[job.ID]
+	ok = ok && w.consumerID == job.ConsumerID
+	if ok {
+		delete(l.waiting, job.ID)
+	}
+	expired := l.timeout > 0 && (!ok || w.fetchedAt < time.Now().Unix()-l.timeout)
 	if ctx.Err() != nil || expired {
-		l.unstarted = append(l.unstarted, job.ID)
+		l.unstarted[job.ConsumerID] = append(l.unstarted[job.ConsumerID], job.ID)
 		return false
 	}
 	if l.timeout > 0 {
-		job.ConsumerFetchedAt = fetchedAt
+		job.ConsumerFetchedAt = w.fetchedAt
 	}
 	return true
 }
 
 // release puts the unstarted jobs back on the queue without using an attempt.
-// A job that is no longer fetched by this consumer is not changed.
+// A job that a later grab holds is not changed.
 func (l *leases) release(ctx context.Context) error {
 	l.mu.Lock()
-	ids := l.unstarted
-	l.unstarted = nil
+	unstarted := l.unstarted
+	l.unstarted = map[int64][]int64{}
 	l.mu.Unlock()
-	if len(ids) == 0 {
-		return nil
+	for consumerID, ids := range unstarted {
+		err := l.q.write(func() error {
+			return l.q.ReleaseJobs(ctx, ReleaseJobsParams{ConsumerID: consumerID, Ids: ids})
+		})
+		if err != nil {
+			return err
+		}
 	}
-	return l.q.write(func() error {
-		return l.q.ReleaseJobs(ctx, ReleaseJobsParams{ConsumerID: l.consumerID, Ids: ids})
-	})
+	return nil
 }
 
 func (l *leases) renew(ctx context.Context) error {
 	now := time.Now().Unix()
-	var ids []int64
+	byConsumer := map[int64][]int64{}
 	l.mu.Lock()
-	for id, fetchedAt := range l.waiting {
-		if fetchedAt < now-l.timeout {
+	for id, w := range l.waiting {
+		if w.fetchedAt < now-l.timeout {
 			// already resettable: another consumer may hold it now
 			delete(l.waiting, id)
 			continue
 		}
-		ids = append(ids, id)
+		byConsumer[w.consumerID] = append(byConsumer[w.consumerID], id)
 	}
 	l.mu.Unlock()
-	if len(ids) == 0 {
-		return nil
-	}
 
-	var renewed []int64
-	err := l.q.write(func() (err error) {
-		renewed, err = l.q.RenewJobs(ctx, RenewJobsParams{RenewedAt: now, ConsumerID: l.consumerID, Ids: ids})
-		return err
-	})
-	if err != nil {
-		return err
-	}
+	for consumerID, ids := range byConsumer {
+		var renewed []int64
+		err := l.q.write(func() (err error) {
+			renewed, err = l.q.RenewJobs(ctx, RenewJobsParams{RenewedAt: now, ConsumerID: consumerID, Ids: ids})
+			return err
+		})
+		if err != nil {
+			return err
+		}
 
-	isRenewed := make(map[int64]bool, len(renewed))
-	for _, id := range renewed {
-		isRenewed[id] = true
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, id := range ids {
-		if _, ok := l.waiting[id]; !ok {
-			// started during the renewal
-			continue
+		isRenewed := make(map[int64]bool, len(renewed))
+		for _, id := range renewed {
+			isRenewed[id] = true
 		}
-		if isRenewed[id] {
-			l.waiting[id] = now
-		} else {
-			delete(l.waiting, id)
+		l.mu.Lock()
+		for _, id := range ids {
+			if w, ok := l.waiting[id]; !ok || w.consumerID != consumerID {
+				// started during the renewal
+				continue
+			}
+			if isRenewed[id] {
+				l.waiting[id] = lease{consumerID, now}
+			} else {
+				delete(l.waiting, id)
+			}
 		}
+		l.mu.Unlock()
 	}
 	return nil
 }
@@ -427,28 +439,28 @@ func (l *leases) renew(ctx context.Context) error {
 // released only once its job is committed. Under low load a batch is a single
 // id and no latency is added.
 type acks struct {
-	q          *Queue
-	consumerID int64
-	pending    chan ack
-	flushed    chan struct{}
+	q       *Queue
+	pending chan ack
+	flushed chan struct{}
 }
 
 type ack struct {
-	id   int64
-	done chan error
+	id         int64
+	consumerID int64
+	done       chan error
 }
 
-func (q *Queue) newAcks(ctx context.Context, consumerID int64, buffer int) *acks {
-	a := &acks{q: q, consumerID: consumerID, pending: make(chan ack, buffer), flushed: make(chan struct{})}
+func (q *Queue) newAcks(ctx context.Context, buffer int) *acks {
+	a := &acks{q: q, pending: make(chan ack, buffer), flushed: make(chan struct{})}
 	// acks still in flight must be saved after ctx is canceled
 	go a.run(context.WithoutCancel(ctx))
 	return a
 }
 
 // send blocks until the job is committed.
-func (a *acks) send(id int64) error {
+func (a *acks) send(job *Job) error {
 	done := make(chan error, 1)
-	a.pending <- ack{id, done}
+	a.pending <- ack{job.ID, job.ConsumerID, done}
 	return <-done
 }
 
@@ -461,7 +473,6 @@ func (a *acks) close() {
 func (a *acks) run(ctx context.Context) {
 	defer close(a.flushed)
 	var batch []ack
-	var ids []int64
 	for c := range a.pending {
 		batch = append(batch[:0], c)
 	drain:
@@ -476,16 +487,20 @@ func (a *acks) run(ctx context.Context) {
 				break drain
 			}
 		}
-		ids = ids[:0]
+		// one UPDATE per grab, usually 1 or 2 for a batch
+		byConsumer := map[int64][]int64{}
 		for _, c := range batch {
-			ids = append(ids, c.id)
+			byConsumer[c.consumerID] = append(byConsumer[c.consumerID], c.id)
 		}
-		// on error, the visibility timeout puts the jobs back, as with CompleteJob before
-		err := a.q.write(func() error {
-			return a.q.CompleteJobs(ctx, CompleteJobsParams{ConsumerID: a.consumerID, Ids: ids})
-		})
+		errs := map[int64]error{}
+		for consumerID, ids := range byConsumer {
+			// on error, the visibility timeout puts the jobs back, as with CompleteJob before
+			errs[consumerID] = a.q.write(func() error {
+				return a.q.CompleteJobs(ctx, CompleteJobsParams{ConsumerID: consumerID, Ids: ids})
+			})
+		}
 		for _, c := range batch {
-			c.done <- err
+			c.done <- errs[c.consumerID]
 		}
 	}
 }

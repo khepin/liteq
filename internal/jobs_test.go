@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -857,4 +858,50 @@ func Test_ShutdownReleasesPrefetchedJobs(t *testing.T) {
 		is.Equal(job.RemainingAttempts, int64(1)) // expected no attempt used
 		is.Equal(len(job.Errors), 0)              // expected no error
 	}
+}
+
+// A run that outlives its visibility timeout cannot change the job once the
+// same consumer fetched it again: only the latest fetch counts.
+func Test_StaleRunOfSameConsumer(t *testing.T) {
+	is := is.New(t)
+	jqueue, err := getJqueue("jobs.db")
+	is.NoErr(err) // error getting job queue
+
+	err = jqueue.QueueJob(context.Background(), internal.QueueJobParams{
+		Queue:             "",
+		Job:               `job:1`,
+		RemainingAttempts: 3,
+	})
+	is.NoErr(err) // error queuing job
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var runs atomic.Int64
+	var id atomic.Int64
+	run1Done := make(chan struct{})
+	jqueue.Consume(ctx, internal.ConsumeParams{
+		Queue:             "",
+		PoolSize:          2,
+		VisibilityTimeout: 2,
+		OnEmptySleep:      100 * time.Millisecond,
+		Worker: func(ctx context.Context, job *internal.Job) error {
+			id.Store(job.ID)
+			switch runs.Add(1) {
+			case 1:
+				// outlives the timeout: the job is reset and fetched again
+				time.Sleep(4 * time.Second)
+				close(run1Done)
+				return fmt.Errorf("run 1 failed late")
+			default:
+				<-run1Done
+				time.Sleep(300 * time.Millisecond)
+				cancel()
+				return nil
+			}
+		},
+	})
+
+	is.Equal(runs.Load(), int64(2)) // expected 2 runs
+	job, err := jqueue.FindJob(context.Background(), id.Load())
+	is.NoErr(err)                        // error finding job
+	is.Equal(job.JobStatus, "completed") // expected run 2 to complete the job
 }
